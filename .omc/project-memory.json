@@ -1,0 +1,57 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1772604276261,
+  "projectRoot": "E:\\CodeRepo\\ScreenMask\\ScreenInverter",
+  "techStack": {
+    "languages": [],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": null,
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "bin"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "bin": {
+      "path": "bin",
+      "purpose": "Executable scripts",
+      "fileCount": 0,
+      "lastAccessed": 1772604276242,
+      "keyFiles": []
+    },
+    "obj": {
+      "path": "obj",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1772604276243,
+      "keyFiles": [
+        "project.assets.json",
+        "project.nuget.cache",
+        "ScreenInverter.csproj.nuget.dgspec.json",
+        "ScreenInverter.csproj.nuget.g.props",
+        "ScreenInverter.csproj.nuget.g.targets"
+      ]
+    }
+  },
+  "hotPaths": [],
+  "userDirectives": []
+}

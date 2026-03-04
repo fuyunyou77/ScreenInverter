@@ -16,13 +16,29 @@
             BorderBrush="#40FFFFFF"
             BorderThickness="2"
             Background="Transparent">
-        <Grid>
+        <Grid x:Name="MainGrid">
             <!-- 屏幕捕获内容 -->
             <Image x:Name="CapturedImage"
                    Stretch="Fill"
+                   IsHitTestVisible="False"
                    RenderOptions.BitmapScalingMode="NearestNeighbor"/>
 
-            <!-- 控制按钮 (鼠标悬停时显示) -->
+            <!-- 锁定状态提示 -->
+            <TextBlock x:Name="StatusText"
+                       Text="已锁定"
+                       Foreground="#00FF00"
+                       FontSize="24"
+                       FontWeight="Bold"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Visibility="Collapsed"
+                       IsHitTestVisible="False">
+                <TextBlock.Effect>
+                    <DropShadowEffect Color="Black" BlurRadius="4" ShadowDepth="0"/>
+                </TextBlock.Effect>
+            </TextBlock>
+
+            <!-- 控制按钮 -->
             <Border x:Name="ControlBar"
                     VerticalAlignment="Top"
                     HorizontalAlignment="Stretch"
@@ -34,12 +50,11 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
                     <!-- 拖动区域提示 -->
                     <TextBlock Grid.Column="0"
-                               Text="拖动调整位置 | 拖动边缘/角落调整大小"
+                               Text="Ctrl+L 锁定/解锁 (穿透模式)"
                                VerticalAlignment="Center"
                                Foreground="White"
                                Margin="10,0,0,0"
@@ -69,11 +84,14 @@
                 </Grid>
             </Border>
 
-            <!-- 调整大小手柄 - 四个角落和四个边缘 -->
+            <!-- 调整大小手柄 -->
             <!-- 左上角 -->
-            <Thumb Width="40" Height="40" HorizontalAlignment="Left" VerticalAlignment="Top"
+            <Thumb Width="50" Height="50" HorizontalAlignment="Left" VerticalAlignment="Top"
                    Margin="-15,-15,0,0"
-                   Cursor="SizeNWSE" DragDelta="OnTopLeftCornerResize">
+                   Cursor="SizeNWSE"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnTopLeftCornerResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -81,12 +99,13 @@
                 </Thumb.Template>
             </Thumb>
 
-            <!-- 右上角 - 留给关闭按钮，不设手柄 -->
-
             <!-- 左下角 -->
-            <Thumb Width="40" Height="40" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+            <Thumb Width="50" Height="50" HorizontalAlignment="Left" VerticalAlignment="Bottom"
                    Margin="-15,0,0,-15"
-                   Cursor="SizeNESW" DragDelta="OnBottomLeftCornerResize">
+                   Cursor="SizeNESW"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnBottomLeftCornerResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -95,9 +114,12 @@
             </Thumb>
 
             <!-- 右下角 -->
-            <Thumb Width="40" Height="40" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+            <Thumb Width="50" Height="50" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                    Margin="0,0,-15,-15"
-                   Cursor="SizeNWSE" DragDelta="OnBottomRightCornerResize">
+                   Cursor="SizeNWSE"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnBottomRightCornerResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -106,9 +128,12 @@
             </Thumb>
 
             <!-- 上边缘 -->
-            <Thumb Height="30" HorizontalAlignment="Stretch" VerticalAlignment="Top"
-                   Margin="0,-15,0,0"
-                   Cursor="SizeNS" DragDelta="OnTopEdgeResize">
+            <Thumb Height="15" HorizontalAlignment="Stretch" VerticalAlignment="Top"
+                   Margin="0,-15,-150,0"
+                   Cursor="SizeNS"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnTopEdgeResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -117,9 +142,12 @@
             </Thumb>
 
             <!-- 下边缘 -->
-            <Thumb Height="30" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
+            <Thumb Height="15" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
                    Margin="0,0,0,-15"
-                   Cursor="SizeNS" DragDelta="OnBottomEdgeResize">
+                   Cursor="SizeNS"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnBottomEdgeResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -128,9 +156,12 @@
             </Thumb>
 
             <!-- 左边缘 -->
-            <Thumb Width="30" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+            <Thumb Width="15" HorizontalAlignment="Left" VerticalAlignment="Stretch"
                    Margin="-15,0,0,0"
-                   Cursor="SizeWE" DragDelta="OnLeftEdgeResize">
+                   Cursor="SizeWE"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnLeftEdgeResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>
@@ -138,10 +169,13 @@
                 </Thumb.Template>
             </Thumb>
 
-            <!-- 右边缘 - 避开控制栏区域，只在下半部分 -->
-            <Thumb Width="30" HorizontalAlignment="Right" VerticalAlignment="Stretch"
+            <!-- 右边缘 -->
+            <Thumb Width="15" HorizontalAlignment="Right" VerticalAlignment="Stretch"
                    Margin="0,30,0,-15"
-                   Cursor="SizeWE" DragDelta="OnRightEdgeResize">
+                   Cursor="SizeWE"
+                   DragStarted="OnResizeDragStarted"
+                   DragDelta="OnRightEdgeResize"
+                   DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template>
                     <ControlTemplate TargetType="Thumb">
                         <Rectangle Fill="Transparent"/>

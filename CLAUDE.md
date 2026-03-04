@@ -38,8 +38,8 @@ ScreenInverter/
 - 捕获流程：`Hide()` → 延迟 16ms → `CaptureRegion()` → 反转像素 → `UpdateBitmap()` → `Show()`
 - DPI 适配：通过 `CompositionTarget.TransformToDevice` 获取缩放比，将 WPF DIP 转换为物理像素
 - 窗口调整：使用 7 个 `Thumb` 控件实现 (右上角留给关闭按钮)
-  - 角落手柄 (40x40, Margin 负偏移 15px)：支持双向拖动
-  - 边缘手柄 (30px 宽/厚，Margin 负偏移 15px)：支持双向拖动
+  - 角落手柄 (50x50, Margin 负偏移 15px)：支持双向拖动
+  - 边缘手柄 (15px 厚，Margin 负偏移 15px)：支持单向拖动
   - 所有手柄完全透明，不遮挡内容
 
 **ScreenCapture** - 屏幕捕获
@@ -56,6 +56,24 @@ ScreenInverter/
 2. **DPI 适配**: 所有坐标/尺寸需乘以 `_dpiScaleX/Y` 转换为物理像素
 3. **闪烁控制**: 拖动时禁用更新，仅在拖动结束后更新一次
 4. **调整大小手柄布局**: 右上角留空避免与关闭按钮冲突，右边缘手柄从顶部 30px 开始
+
+## 已知问题
+
+### 鼠标点击穿透失败
+
+**现象**: 点击窗口区域时，窗口会短暂闪烁（隐藏后重新显示），无法实现真正的点击穿透。
+
+**原因**: 当前架构使用 `Hide()` -> 捕获 -> `Show()` 流程，导致窗口在捕获期间必须隐藏。
+
+**技术限制**:
+- WPF 窗口无法同时实现"显示反色内容"和"鼠标穿透"
+- `IsHitTestVisible="False"` 会禁用所有鼠标交互（包括控制按钮）
+
+**可能的解决方向**:
+1. 使用 Windows API 设置 `WS_EX_TRANSPARENT` 样式
+2. 分离控制窗口和显示窗口
+3. 使用 DirectX/OpenGL 覆盖层
+4. 探索 Desktop Duplication API
 
 ## 依赖
 

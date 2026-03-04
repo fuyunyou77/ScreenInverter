@@ -1,39 +1,60 @@
 using System;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Windows.Controls.Primitives;
 using Point = System.Windows.Point;
 using MouseEventArgs = System.Windows.Input.MouseEventArgs;
 using DragDeltaEventArgs = System.Windows.Controls.Primitives.DragDeltaEventArgs;
+using DragStartedEventArgs = System.Windows.Controls.Primitives.DragStartedEventArgs;
+using DragCompletedEventArgs = System.Windows.Controls.Primitives.DragCompletedEventArgs;
 
 namespace ScreenInverter;
 
 /// <summary>
-/// 屏幕反转覆盖窗口 - 支持拖动、调整大小、实时颜色反转
-/// 拖动时暂停更新以避免闪烁，拖动/调整大小结束后立即更新
+/// 屏幕反转覆盖窗口
+/// 使用 SetWindowDisplayAffinity 排除截图捕获，避免闪烁
+/// 使用 WS_EX_TRANSPARENT 实现鼠标穿透 (Ctrl+L 切换)
 /// </summary>
 public partial class InverterOverlayWindow : Window
 {
+    // --- Win32 API 定义 ---
+    private const int GWL_EXSTYLE = -20;
+    private const int WS_EX_TRANSPARENT = 0x00000020;
+    private const int WS_EX_LAYERED = 0x00080000;
+    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+
+    [DllImport("user32.dll")]
+    private static extern int GetWindowLong(IntPtr hwnd, int index);
+
+    [DllImport("user32.dll")]
+    private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
+
+    [DllImport("user32.dll")]
+    private static extern uint SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    // --- 字段 ---
     private readonly ScreenCapture _screenCapture;
     private WriteableBitmap? _writeableBitmap;
     private bool _isDragging;
+    private bool _isResizing;
     private Point _dragStartPoint;
-    private int _inversionMode; // 0 = 全反转，1 = 仅亮度
+    private int _inversionMode;
     private readonly DispatcherTimer _captureTimer;
     private double _dpiScaleX = 1.0;
     private double _dpiScaleY = 1.0;
     private bool _isCapturing;
-    private double _lastLeft;
-    private double _lastTop;
-    private double _lastWidth;
-    private double _lastHeight;
-    private bool _needsRecapture;
+    private bool _isLocked = false; // 锁定状态（穿透模式）
 
     public InverterOverlayWindow()
     {
@@ -42,8 +63,10 @@ public partial class InverterOverlayWindow : Window
         _screenCapture = new ScreenCapture();
         _screenCapture.Initialize();
 
-        // 在窗口加载后获取 DPI
-        this.Loaded += async (s, e) =>
+        // 窗口初始化完成后应用 "截图排除" 属性
+        this.SourceInitialized += OnSourceInitialized;
+
+        this.Loaded += (s, e) =>
         {
             var source = PresentationSource.FromVisual(this);
             if (source != null)
@@ -51,160 +74,188 @@ public partial class InverterOverlayWindow : Window
                 _dpiScaleX = source.CompositionTarget.TransformToDevice.M11;
                 _dpiScaleY = source.CompositionTarget.TransformToDevice.M22;
             }
-            // 初始捕获
-            await CaptureAndUpdateAsync();
+            ReinitializeBitmap();
         };
 
-        // 设置窗口位置到屏幕中央
+        // 初始位置
         this.Left = 100;
         this.Top = 100;
         this.Width = 500;
         this.Height = 400;
 
-        // 初始化位图
-        ReinitializeBitmap();
-
-        // 绑定事件
+        // 事件绑定
         this.MouseLeftButtonDown += OnMouseLeftButtonDown;
         this.MouseLeftButtonUp += OnMouseLeftButtonUp;
         this.MouseMove += OnMouseMove;
-        this.SizeChanged += OnSizeChanged;
-        this.LocationChanged += OnLocationChanged;
 
-        // 设置定时器捕获 - 静止时定期更新
+        // 定时器：处理截图刷新 + 检测快捷键
         _captureTimer = new DispatcherTimer
         {
-            Interval = TimeSpan.FromMilliseconds(200)
+            Interval = TimeSpan.FromMilliseconds(33) // ~30FPS，不再闪烁
         };
-        _captureTimer.Tick += async (s, e) => await CaptureLoopAsync();
+        _captureTimer.Tick += TimerTick;
         _captureTimer.Start();
     }
 
-    private void OnLocationChanged(object? sender, EventArgs e)
+    private void OnSourceInitialized(object? sender, EventArgs e)
     {
-        // 位置改变时标记需要重新捕获
-        _needsRecapture = true;
+        var helper = new WindowInteropHelper(this);
+        // 关键：设置此窗口不被系统截图捕获 (CopyFromScreen 会直接"看穿"它)
+        // 仅支持 Windows 10 2004 及以上版本
+        try
+        {
+            SetWindowDisplayAffinity(helper.Handle, WDA_EXCLUDEFROMCAPTURE);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Failed to set display affinity: {ex.Message}");
+        }
     }
 
-    private void OnSizeChanged(object sender, SizeChangedEventArgs e)
+    private async void TimerTick(object? sender, EventArgs e)
     {
-        ReinitializeBitmap();
-        _needsRecapture = true;
+        // 1. 检测快捷键 (Ctrl + L) 切换锁定状态
+        // VK_CONTROL = 0x11, L = 0x4C
+        bool isCtrlPressed = (GetAsyncKeyState(0x11) & 0x8000) != 0;
+        bool isLPressed = (GetAsyncKeyState(0x4C) & 0x8000) != 0;
+
+        if (isCtrlPressed && isLPressed)
+        {
+            ToggleLockState();
+            // 简单延时防止连续触发
+            await Task.Delay(300);
+        }
+
+        // 2. 执行捕获
+        await CaptureLoopAsync();
+    }
+
+    private void ToggleLockState()
+    {
+        _isLocked = !_isLocked;
+        var helper = new WindowInteropHelper(this);
+        int exStyle = GetWindowLong(helper.Handle, GWL_EXSTYLE);
+
+        if (_isLocked)
+        {
+            // 进入穿透模式：设置 WS_EX_TRANSPARENT
+            SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+
+            // 隐藏 UI 元素，只留滤镜
+            MainBorder.BorderThickness = new Thickness(0);
+            ControlBar.Visibility = Visibility.Collapsed;
+            ResizeThumbsVisibility(Visibility.Collapsed);
+            StatusText.Visibility = Visibility.Visible;
+            StatusText.Text = "已锁定 (穿透模式)。按 Ctrl+L 解锁";
+
+            // 3秒后隐藏提示
+            Task.Delay(3000).ContinueWith(_ => Dispatcher.Invoke(() => StatusText.Visibility = Visibility.Collapsed));
+        }
+        else
+        {
+            // 退出穿透模式：移除 WS_EX_TRANSPARENT
+            SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+
+            // 恢复 UI
+            MainBorder.BorderThickness = new Thickness(2);
+            ControlBar.Visibility = Visibility.Visible;
+            ResizeThumbsVisibility(Visibility.Visible);
+            StatusText.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void ResizeThumbsVisibility(Visibility v)
+    {
+        // 遍历 Grid 里的所有 Thumb 控件并隐藏/显示
+        foreach (var child in MainGrid.Children)
+        {
+            if (child is Thumb thumb)
+            {
+                thumb.Visibility = v;
+            }
+        }
     }
 
     private async Task CaptureLoopAsync()
     {
-        // 拖动时或正在捕获时不更新
-        if (_isDragging || _isCapturing) return;
+        if (_isDragging || _isResizing || _isCapturing) return;
 
-        // 如果需要重新捕获（拖动/调整大小结束后）
-        if (_needsRecapture)
-        {
-            _needsRecapture = false;
-            _lastLeft = this.Left;
-            _lastTop = this.Top;
-            _lastWidth = this.ActualWidth;
-            _lastHeight = this.ActualHeight;
-            await CaptureAndUpdateAsync();
-            return;
-        }
-
-        // 检查位置/大小是否有变化（被动更新）
-        var changed = (_lastLeft != this.Left || _lastTop != this.Top ||
-                       _lastWidth != this.ActualWidth || _lastHeight != this.ActualHeight);
-
-        if (changed)
-        {
-            _lastLeft = this.Left;
-            _lastTop = this.Top;
-            _lastWidth = this.ActualWidth;
-            _lastHeight = this.ActualHeight;
-            await CaptureAndUpdateAsync();
-        }
+        // 既然去掉了 Hide/Show 的闪烁副作用，可以一直刷新
+        await CaptureAndUpdateAsync();
     }
 
     private async Task CaptureAndUpdateAsync()
     {
-        if (_isCapturing || !this.IsVisible) return;
+        if (_isCapturing || !this.IsVisible || this.WindowState == WindowState.Minimized) return;
 
         _isCapturing = true;
 
-        try
+        await Task.Run(() =>
         {
-            // 获取窗口在屏幕上的位置（物理像素）
-            var windowLeftPx = (int)(this.Left * _dpiScaleX);
-            var windowTopPx = (int)(this.Top * _dpiScaleY);
-            var windowWidthPx = (int)(this.ActualWidth * _dpiScaleX);
-            var windowHeightPx = (int)(this.ActualHeight * _dpiScaleY);
-
-            if (windowWidthPx <= 0 || windowHeightPx <= 0) return;
-
-            // 获取主显示器的位置偏移
-            var screenLeft = (int)SystemInformation.VirtualScreen.Left;
-            var screenTop = (int)SystemInformation.VirtualScreen.Top;
-
-            // 计算捕获区域
-            var captureX = windowLeftPx + screenLeft;
-            var captureY = windowTopPx + screenTop;
-
-            // 临时隐藏窗口进行捕获
-            this.Hide();
-
-            // 等待窗口完全隐藏
-            await Task.Delay(16);
-
             try
             {
-                var bitmap = _screenCapture.CaptureRegion(captureX, captureY, windowWidthPx, windowHeightPx);
+                // 获取窗口物理参数
+                int x = 0, y = 0, w = 0, h = 0;
+
+                Dispatcher.Invoke(() =>
+                {
+                    x = (int)(this.Left * _dpiScaleX);
+                    y = (int)(this.Top * _dpiScaleY);
+                    w = (int)(this.ActualWidth * _dpiScaleX);
+                    h = (int)(this.ActualHeight * _dpiScaleY);
+                });
+
+                if (w <= 0 || h <= 0) return;
+
+                // 修正坐标 (VirtualScreen)
+                int screenLeft = SystemInformation.VirtualScreen.Left;
+                int screenTop = SystemInformation.VirtualScreen.Top;
+                int captureX = x + screenLeft;
+                int captureY = y + screenTop;
+
+                // --- 核心修改：不再调用 Hide() 和 Show() ---
+                // 因为 SetWindowDisplayAffinity 已经让 API "看不见" 这个窗口了
+
+                using var bitmap = _screenCapture.CaptureRegion(captureX, captureY, w, h);
                 if (bitmap == null) return;
+
+                var data = bitmap.LockBits(
+                    new Rectangle(0, 0, w, h),
+                    ImageLockMode.ReadWrite,
+                    PixelFormat.Format32bppArgb);
 
                 try
                 {
-                    // 锁定像素
-                    var data = bitmap.LockBits(
-                        new System.Drawing.Rectangle(0, 0, windowWidthPx, windowHeightPx),
-                        ImageLockMode.ReadWrite,
-                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    int byteCount = w * h * 4;
+                    var pixelData = new byte[byteCount];
+                    Marshal.Copy(data.Scan0, pixelData, 0, byteCount);
 
-                    try
-                    {
-                        var pixelData = new byte[windowWidthPx * windowHeightPx * 4];
-                        System.Runtime.InteropServices.Marshal.Copy(data.Scan0, pixelData, 0, pixelData.Length);
+                    // 颜色处理
+                    int mode = 0;
+                    Dispatcher.Invoke(() => mode = _inversionMode);
 
-                        // 应用颜色反转
-                        if (_inversionMode == 0)
-                            Inverter.InvertColors(pixelData, windowWidthPx, windowHeightPx);
-                        else
-                            Inverter.InvertLightnessOnly(pixelData, windowWidthPx, windowHeightPx);
+                    if (mode == 0)
+                        Inverter.InvertColors(pixelData, w, h);
+                    else
+                        Inverter.InvertLightnessOnly(pixelData, w, h);
 
-                        // 更新位图
-                        UpdateBitmap(pixelData, windowWidthPx, windowHeightPx);
-                    }
-                    finally
-                    {
-                        bitmap.UnlockBits(data);
-                    }
+                    // 回到 UI 线程更新
+                    Dispatcher.Invoke(() => UpdateBitmap(pixelData, w, h));
                 }
                 finally
                 {
-                    bitmap.Dispose();
+                    bitmap.UnlockBits(data);
                 }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Capture error: {ex}");
             }
             finally
             {
-                // 恢复窗口显示
-                this.Show();
-                this.Topmost = true;
+                _isCapturing = false;
             }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Capture error: {ex}");
-        }
-        finally
-        {
-            _isCapturing = false;
-        }
+        });
     }
 
     private void ReinitializeBitmap()
@@ -233,55 +284,47 @@ public partial class InverterOverlayWindow : Window
             ReinitializeBitmap();
         }
 
-        _writeableBitmap?.Lock();
+        if (_writeableBitmap == null) return;
+
+        _writeableBitmap.Lock();
         try
         {
-            _writeableBitmap?.WritePixels(
-                new Int32Rect(0, 0, width, height),
-                pixelData,
-                width * 4,
-                0);
+            Marshal.Copy(pixelData, 0, _writeableBitmap.BackBuffer, pixelData.Length);
+            _writeableBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
         }
         finally
         {
-            _writeableBitmap?.Unlock();
+            _writeableBitmap.Unlock();
         }
     }
 
+    // --- 交互事件处理 ---
+
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        // 只在点击窗口内部时开始拖动（Thumb 控件会自动处理边缘拖动）
+        if (_isLocked) return; // 锁定模式下不处理
         _isDragging = true;
         _dragStartPoint = e.GetPosition(this);
         this.CaptureMouse();
     }
 
-    private async void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    private void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         if (_isDragging)
         {
             _isDragging = false;
             this.ReleaseMouseCapture();
-            // 拖动结束后立即更新
-            _needsRecapture = true;
-            await CaptureLoopAsync();
         }
     }
 
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
-        if (_isDragging)
+        if (_isDragging && !_isLocked)
         {
             var currentPoint = e.GetPosition(this);
             this.Left += currentPoint.X - _dragStartPoint.X;
             this.Top += currentPoint.Y - _dragStartPoint.Y;
         }
-        // 如果正在调整大小，不处理拖动逻辑
-    }
-
-    private void OnMouseWheel(object sender, MouseWheelEventArgs e)
-    {
-        // 不再处理滚轮调整大小，使用窗口自带的 ResizeGrip
     }
 
     private void ModeButton_Click(object sender, RoutedEventArgs e)
@@ -296,9 +339,21 @@ public partial class InverterOverlayWindow : Window
         this.Close();
     }
 
-    // 调整大小事件处理 - 八个方向
+    // 调整大小事件处理
+    private void OnResizeDragStarted(object sender, DragStartedEventArgs e)
+    {
+        _isResizing = true;
+    }
+
+    private void OnResizeDragCompleted(object sender, DragCompletedEventArgs e)
+    {
+        _isResizing = false;
+    }
+
+    // 八个方向的调整大小
     private void OnTopLeftCornerResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         var newWidth = Math.Max(100, this.Width - e.HorizontalChange);
         var newHeight = Math.Max(100, this.Height - e.VerticalChange);
         this.Width = newWidth;
@@ -309,6 +364,7 @@ public partial class InverterOverlayWindow : Window
 
     private void OnTopRightCornerResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         var newWidth = Math.Max(100, this.Width + e.HorizontalChange);
         var newHeight = Math.Max(100, this.Height - e.VerticalChange);
         this.Width = newWidth;
@@ -318,6 +374,7 @@ public partial class InverterOverlayWindow : Window
 
     private void OnBottomLeftCornerResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         var newWidth = Math.Max(100, this.Width - e.HorizontalChange);
         var newHeight = Math.Max(100, this.Height + e.VerticalChange);
         this.Width = newWidth;
@@ -327,12 +384,14 @@ public partial class InverterOverlayWindow : Window
 
     private void OnBottomRightCornerResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         this.Width = Math.Max(100, this.Width + e.HorizontalChange);
         this.Height = Math.Max(100, this.Height + e.VerticalChange);
     }
 
     private void OnTopEdgeResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         var newHeight = Math.Max(100, this.Height - e.VerticalChange);
         this.Height = newHeight;
         this.Top += e.VerticalChange;
@@ -340,11 +399,13 @@ public partial class InverterOverlayWindow : Window
 
     private void OnBottomEdgeResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         this.Height = Math.Max(100, this.Height + e.VerticalChange);
     }
 
     private void OnLeftEdgeResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         var newWidth = Math.Max(100, this.Width - e.HorizontalChange);
         this.Width = newWidth;
         this.Left += e.HorizontalChange;
@@ -352,6 +413,7 @@ public partial class InverterOverlayWindow : Window
 
     private void OnRightEdgeResize(object sender, DragDeltaEventArgs e)
     {
+        if (_isLocked) return;
         this.Width = Math.Max(100, this.Width + e.HorizontalChange);
     }
 
