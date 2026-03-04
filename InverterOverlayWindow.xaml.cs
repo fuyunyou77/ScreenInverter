@@ -197,12 +197,13 @@ public partial class InverterOverlayWindow : Window
                 // 获取窗口物理参数
                 int x = 0, y = 0, w = 0, h = 0;
 
+                // 使用 Math.Round 进行四舍五入，减少坐标偏移
                 Dispatcher.Invoke(() =>
                 {
-                    x = (int)(this.Left * _dpiScaleX);
-                    y = (int)(this.Top * _dpiScaleY);
-                    w = (int)(this.ActualWidth * _dpiScaleX);
-                    h = (int)(this.ActualHeight * _dpiScaleY);
+                    x = (int)Math.Round(this.Left * _dpiScaleX);
+                    y = (int)Math.Round(this.Top * _dpiScaleY);
+                    w = (int)Math.Round(this.ActualWidth * _dpiScaleX);
+                    h = (int)Math.Round(this.ActualHeight * _dpiScaleY);
                 });
 
                 if (w <= 0 || h <= 0) return;
@@ -230,14 +231,25 @@ public partial class InverterOverlayWindow : Window
                     var pixelData = new byte[byteCount];
                     Marshal.Copy(data.Scan0, pixelData, 0, byteCount);
 
-                    // 颜色处理
+                    // 颜色处理 - 3种模式
                     int mode = 0;
                     Dispatcher.Invoke(() => mode = _inversionMode);
 
                     if (mode == 0)
+                    {
+                        // 模式 0: 智能文档模式 (推荐)
+                        Inverter.ProcessSmartInvert(pixelData, w, h);
+                    }
+                    else if (mode == 1)
+                    {
+                        // 模式 1: 全局简单反转 (夜视仪风格)
                         Inverter.InvertColors(pixelData, w, h);
+                    }
                     else
+                    {
+                        // 模式 2: 仅反转亮度 (保留颜色)
                         Inverter.InvertLightnessOnly(pixelData, w, h);
+                    }
 
                     // 回到 UI 线程更新
                     Dispatcher.Invoke(() => UpdateBitmap(pixelData, w, h));
@@ -329,8 +341,15 @@ public partial class InverterOverlayWindow : Window
 
     private void ModeButton_Click(object sender, RoutedEventArgs e)
     {
-        _inversionMode = (_inversionMode + 1) % 2;
-        ModeButton.Content = _inversionMode == 0 ? "模式：全反转" : "模式：亮度反转";
+        // 现在有 3 种模式
+        _inversionMode = (_inversionMode + 1) % 3;
+
+        switch (_inversionMode)
+        {
+            case 0: ModeButton.Content = "模式：智能文档"; break;
+            case 1: ModeButton.Content = "模式：强力全反"; break;
+            case 2: ModeButton.Content = "模式：仅反亮度"; break;
+        }
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)

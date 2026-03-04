@@ -10,18 +10,21 @@
         Topmost="True"
         ShowInTaskbar="False"
         WindowStartupLocation="Manual"
-        ResizeMode="NoResize">
+        ResizeMode="NoResize"
+        UseLayoutRounding="True">
 
     <Border x:Name="MainBorder"
             BorderBrush="#40FFFFFF"
             BorderThickness="2"
-            Background="Transparent">
+            Background="Transparent"
+            SnapsToDevicePixels="True">
         <Grid x:Name="MainGrid">
             <!-- 屏幕捕获内容 -->
             <Image x:Name="CapturedImage"
                    Stretch="Fill"
                    IsHitTestVisible="False"
-                   RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   SnapsToDevicePixels="True"/>
 
             <!-- 锁定状态提示 -->
             <TextBlock x:Name="StatusText"
@@ -63,7 +66,7 @@
                     <!-- 反转模式切换 -->
                     <Button Grid.Column="1"
                             x:Name="ModeButton"
-                            Content="模式：全反转"
+                            Content="模式：智能文档"
                             Click="ModeButton_Click"
                             Foreground="White"
                             Background="#40FFFFFF"

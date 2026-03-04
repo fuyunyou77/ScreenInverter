@@ -1,385 +1,150 @@
-针对你提供的项目代码和 `report.md` 中描述的痛点（鼠标穿透失败、屏幕捕获闪烁），最核心的解决方案在于利用 Windows API 的 **`SetWindowDisplayAffinity`** 和 **`WS_EX_TRANSPARENT`**。
+根据你提供的 `change.md` 中的分析与指令，以及现有的代码结构，我已经完成了代码的审查和优化。
 
-### 解决方案核心思路
+你所提供的 `change.md` 准确地指出了问题的核心：
+1.  **缩放伪影 (Artifacts)**：由 `NearestNeighbor` 导致，解决方案是改为 `HighQuality`。
+2.  **ClearType 冲突 (Jagged Edges)**：由简单的颜色/亮度判定导致，解决方案是引入“亮度感知”逻辑，**强制反转暗色高饱和度像素**（即 ClearType 的边缘）。
 
-1.  **解决闪烁问题 (`SetWindowDisplayAffinity`)**：
-    目前的实现采用 `Hide() -> 截图 -> Show()` 的笨办法来避免窗口截取到自己。
-    **新方案**：调用 `SetWindowDisplayAffinity` 并设置 `WDA_EXCLUDEFROMCAPTURE`。这会告诉 Windows 桌面管理器（DWM）："当任何人截图时，请忽略此窗口（使其不可见），但在屏幕上保持显示"。
-    **结果**：彻底移除 `Hide/Show` 逻辑，消除闪烁，实现平滑的 60fps+ 更新。
+现有的代码（特别是 `Inverter.cs` 和 `InverterOverlayWindow.xaml`）已经基本体现了这些修复。为了确保问题彻底解决，我整理了最终的定稿代码。请确保你的项目完全使用以下代码。
 
-2.  **解决鼠标穿透 (`WS_EX_TRANSPARENT`)**：
-    WPF 的 `IsHitTestVisible` 无法实现真正的穿透（即点击到底层应用）。必须修改窗口样式的扩展属性（ExStyle）。
-    **新方案**：引入"锁定模式"。
-    * **未锁定**：可以拖动、调整大小、配置。
-    * **锁定 (按 Ctrl+L)**：窗口通过 API 设置为 `WS_EX_TRANSPARENT`，鼠标操作完全穿透到底层，同时隐藏控制栏和边框，只保留滤镜效果。
+### 1. 核心算法修复 (`Inverter.cs`)
 
-以下是修改后的完整代码实现。
-
----
-
-### 1. 修改 `InverterOverlayWindow.xaml.cs.xaml.cs`
-
-这是改动最大的文件。我移除了 `Hide/Show` 逻辑，添加了 Win32 API 互操作，并增加了锁定机制。
+这是最关键的修改。原有的逻辑可能会把“暗红色的文字边缘”误判为“红色图片”而保留原色，导致黑底上出现杂乱的红边。
+新的逻辑通过 `isBrightImage = (sat > 60) && (luma > 90)` 确保只有****明亮且鲜艳**的区域才保留原色，其余（包括暗色的 ClearType 边缘）一律进行亮度反转。
 
 ```csharp
 using System;
-using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Input;
-using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Threading;
 
 namespace ScreenInverter;
 
-public partial class InverterOverlayWindow : Window
+/// <summary>
+/// 屏幕颜色反转器 - 核心算法库
+/// </summary>
+public class Inverter
 {
-    // --- Win32 API 定义 ---
-    private const int GWL_EXSTYLE = -20;
-    private const int WS_EX_TRANSPARENT = 0x00000020;
-    private const int WS_EX_LAYERED = 0x00080000;
-    private const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011;
+    private static readonly byte[] _softInvertTable = new byte[256];
+    private static bool _isTableInitialized = false;
 
-    [DllImport("user32.dll")]
-    private static extern int GetWindowLong(IntPtr hwnd, int index);
-
-    [DllImport("user32.dll")]
-    private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
-
-    [DllImport("user32.dll")]
-    private static extern uint SetWindowDisplayAffinity(IntPtr hwnd, uint dwAffinity);
-
-    [DllImport("user32.dll")]
-    private static extern short GetAsyncKeyState(int vKey);
-
-    // --- 字段 ---
-    private readonly ScreenCapture _screenCapture;
-    private WriteableBitmap? _writeableBitmap;
-    private bool _isDragging;
-    private bool _isResizing;
-    private Point _dragStartPoint;
-    private int _inversionMode; 
-    private readonly DispatcherTimer _captureTimer;
-    private double _dpiScaleX = 1.0;
-    private double _dpiScaleY = 1.0;
-    private bool _isCapturing;
-    private bool _isLocked = false; // 锁定状态（穿透模式）
-
-    public InverterOverlayWindow()
+    /// <summary>
+    /// 初始化柔和反转 LUT (避免纯黑纯白刺眼)
+    /// </summary>
+    private static void InitializeTable()
     {
-        InitializeComponent();
+        if (_isTableInitialized) return;
 
-        _screenCapture = new ScreenCapture();
-        _screenCapture.Initialize();
-
-        // 窗口初始化完成后应用 "截图排除" 属性
-        this.SourceInitialized += OnSourceInitialized;
-
-        this.Loaded += (s, e) =>
+        for (int i = 0; i < 256; i++)
         {
-            var source = PresentationSource.FromVisual(this);
-            if (source != null)
+            // 输入 255 (白) -> 输出 25 (深灰)
+            // 输入 0 (黑)   -> 输出 215 (灰白)
+            double normalized = i / 255.0;
+            double inverted = 1.0 - normalized;
+            byte val = (byte)(25 + (inverted * (215 - 25)));
+            _softInvertTable[i] = val;
+        }
+        _isTableInitialized = true;
+    }
+
+    /// <summary>
+    /// 智能文档模式 (Smart Invert) - 修复 ClearType 锯齿问题
+    /// </summary>
+    public static void ProcessSmartInvert(byte[] pixelData, int width, int height)
+    {
+        if (!_isTableInitialized) InitializeTable();
+
+        Parallel.For(0, pixelData.Length / 4, i =>
+        {
+            int idx = i * 4;
+            byte b = pixelData[idx];
+            byte g = pixelData[idx + 1];
+            byte r = pixelData[idx + 2];
+
+            // 1. 计算亮度 (Luma) 和 饱和度 (Saturation)
+            // Luma = 0.299R + 0.587G + 0.114B (近似整数运算)
+            int luma = (r * 77 + g * 150 + b * 29) >> 8;
+            
+            byte max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+            byte min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+            int sat = max - min;
+
+            // 2. 核心判定：解决 ClearType 边缘问题的关键
+            // ClearType 边缘通常是 "高饱和度" 但 "低亮度" (如深红/深蓝边缘)
+            // 旧算法只看饱和度会导致边缘不反转，形成锯齿。
+            // 新算法要求必须是 "既鲜艳 又 明亮" 才保留原色。
+            
+            bool isBrightImage = (sat > 60) && (luma > 90);
+
+            if (isBrightImage)
             {
-                _dpiScaleX = source.CompositionTarget.TransformToDevice.M11;
-                _dpiScaleY = source.CompositionTarget.TransformToDevice.M22;
+                // [保留原色]：适用于高亮图表、图片
+```             // 稍微压暗 (x0.9) 避免黑底上过于刺眼
+                pixelData[idx] = (byte)((b * 230) >> 8);
+                pixelData[idx + 1] = (byte)((g * 230) >> 8);
+                pixelData[idx + 2] = (byte)((r * 230) >> 8);
             }
-            ReinitializeBitmap();
-        };
-
-        // 初始位置
-        this.Left = 100;
-        this.Top = 100;
-        this.Width = 500;
-        this.Height = 400;
-
-        // 事件绑定
-        this.MouseLeftButtonDown += OnMouseLeftButtonDown;
-        this.MouseLeftButtonUp += OnMouseLeftButtonUp;
-        this.MouseMove += OnMouseMove;
-        
-        // 定时器：处理截图刷新 + 检测快捷键
-        _captureTimer = new DispatcherTimer
-        {
-            Interval = TimeSpan.FromMilliseconds(33) // 提高刷新率到 ~30FPS，因为不再闪烁了
-        };
-        _captureTimer.Tick += TimerTick;
-        _captureTimer.Start();
-    }
-
-    private void OnSourceInitialized(object? sender, EventArgs e)
-    {
-        var helper = new WindowInteropHelper(this);
-        // 关键：设置此窗口不被系统截图捕获 (CopFromScreen 会直接"看穿"它)
-        // 仅支持 Windows 10 2004 及以上版本
-        try 
-        {
-            SetWindowDisplayAffinity(helper.Handle, WDA_EXCLUDEFROMCAPTURE);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"Failed to set display affinity: {ex.Message}");
-        }
-    }
-
-    private async void TimerTick(object? sender, EventArgs e)
-    {
-        // 1. 检测快捷键 (Ctrl + L) 切换锁定状态
-        // VK_CONTROL = 0x11, L = 0x4C
-        bool isCtrlPressed = (GetAsyncKeyState(0x11) & 0x8000) != 0;
-        bool isLPressed = (GetAsyncKeyState(0x4C) & 0x8000) != 0;
-
-        // 简单的防抖动逻辑可以加在这里，但对于 Toggle 来说，每秒检测配合状态检查即可
-        // 这里为了简化演示，假设用户按得很快，实际使用建议加个 timestamp 防抖
-        if (isCtrlPressed && isLPressed)
-        {
-            ToggleLockState();
-            // 简单延时防止连续触发
-            await Task.Delay(300); 
-        }
-
-        // 2. 执行捕获
-        await CaptureLoopAsync();
-    }
-
-    private void ToggleLockState()
-    {
-        _isLocked = !_isLocked;
-        var helper = new WindowInteropHelper(this);
-        int exStyle = GetWindowLong(helper.Handle, GWL_EXSTYLE);
-
-        if (_isLocked)
-        {
-            // 进入穿透模式：设置 WS_EX_TRANSPARENT
-            SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
-            
-            // 隐藏 UI 元素，只留滤镜
-            MainBorder.BorderThickness = new Thickness(0);
-            ControlBar.Visibility = Visibility.Collapsed;
-            ResizeThumbsVisibility(Visibility.Collapsed);
-            StatusText.Visibility = Visibility.Visible; // 短暂显示提示
-            StatusText.Text = "已锁定 (穿透模式)。按 Ctrl+L 解锁";
-            
-            // 3秒后隐藏提示
-            Task.Delay(3000).ContinueWith(_ => Dispatcher.Invoke(() => StatusText.Visibility = Visibility.Collapsed));
-        }
-        else
-        {
-            // 退出穿透模式：移除 WS_EX_TRANSPARENT
-            SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
-            
-            // 恢复 UI
-            MainBorder.BorderThickness = new Thickness(2);
-            ControlBar.Visibility = Visibility.Visible;
-            ResizeThumbsVisibility(Visibility.Visible);
-            StatusText.Visibility = Visibility.Collapsed;
-        }
-    }
-
-    private void ResizeThumbsVisibility(Visibility v)
-    {
-        // 遍历 Grid 里的所有 Thumb 控件并隐藏/显示
-        foreach (var child in MainGrid.Children)
-        {
-            if (child is System.Windows.Controls.Primitives.Thumb thumb)
+            else
             {
-                thumb.Visibility = v;
-            }
-        }
-    }
-
-    private async Task CaptureLoopAsync()
-    {
-        if (_isDragging || _isResizing || _isCapturing) return;
-
-        // 即使没有移动，如果画面内容在变（比如看视频），也需要刷新
-        // 既然去掉了 Hide/Show 的闪烁副作用，我们可以一直刷新
-        await CaptureAndUpdateAsync();
-    }
-
-    private async Task CaptureAndUpdateAsync()
-    {
-        if (_isCapturing || !this.IsVisible || this.WindowState == WindowState.Minimized) return;
-
-        _isCapturing = true;
-
-        await Task.Run(() =>
-        {
-            try
-            {
-                // 获取窗口物理参数
-                int x=0, y=0, w=0, h=0;
+                // [亮度反转]：适用于文字、背景、以及 ClearType 边缘
+                // 这样 ClearType 的暗色边缘会被反转为亮色边缘，与白色文字完美融合
                 
-                Dispatcher.Invoke(() =>
-                {
-                    x = (int)(this.Left * _dpiScaleX);
-                    y = (int)(this.Top * _dpiScaleY);
-                    w = (int)(this.ActualWidth * _dpiScaleX);
-                    h = (int)(this.ActualHeight * _dpiScaleY);
-                });
+                byte targetLuma = _softInvertTable[luma];
+                int diff = targetLuma - luma;
 
-                if (w <= 0 || h <= 0) return;
+                // 应用亮度差值，保留色相
+                int nb = b + diff;
+                int ng = g + diff;
+                int nr = r + diff;
 
-                // 修正坐标 (VirtualScreen)
-                int screenLeft = (int)System.Windows.Forms.SystemInformation.VirtualScreen.Left;
-                int screenTop = (int)System.Windows.Forms.SystemInformation.VirtualScreen.Top;
-                int captureX = x + screenLeft;
-                int captureY = y + screenTop;
-
-                // --- 核心修改：不再调用 Hide() 和 Show() ---
-                // 因为 SetWindowDisplayAffinity 已经让 API "看不见" 这个窗口了
-                
-                using var bitmap = _screenCapture.CaptureRegion(captureX, captureY, w, h);
-                if (bitmap == null) return;
-
-                var data = bitmap.LockBits(
-                    new System.Drawing.Rectangle(0, 0, w, h),
-                    ImageLockMode.ReadWrite,
-                    System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-
-                try
-                {
-                    int byteCount = w * h * 4;
-                    var pixelData = new byte[byteCount];
-                    Marshal.Copy(data.Scan0, pixelData, 0, byteCount);
-
-                    // 颜色处理
-                    // 注意：由于是在后台线程，需要获取 mode 副本
-                    int mode = 0; 
-                    Dispatcher.Invoke(() => mode = _inversionMode);
-
-                    if (mode == 0)
-                        Inverter.InvertColors(pixelData, w, h);
-                    else
-                        Inverter.InvertLightnessOnly(pixelData, w, h);
-
-                    // 回到 UI 线程更新
-                    Dispatcher.Invoke(() => UpdateBitmap(pixelData, w, h));
-                }
-                finally
-                {
-                    bitmap.UnlockBits(data);
-                }
-            }
-            catch (Exception ex)
-            {
-                // 忽略并发错误
-            }
-            finally
-            {
-                _isCapturing = false;
+                // Clamp 防止溢出
+                pixelData[idx] = (byte)(nb < 0 ? 0 : (nb > 255 ? 255 : nb));
+                pixelData[idx + 1] = (byte)(ng < 0 ? 0 : (ng > 255 ? 255 : ng));
+                pixelData[idx + 2] = (byte)(nr < 0 ? 0 : (nr > 255 ? 255 : nr));
             }
         });
     }
 
-    private void ReinitializeBitmap()
+    // ... 其他方法 (InvertColors, InvertLightnessOnly, CreateBitmapSource) 保持不变 ...
+    // 为了完整性，这里包含它们：
+    public static void InvertColors(byte[] pixelData, int width, int height)
     {
-        var pixelWidth = (int)(this.Width * _dpiScaleX);
-        var pixelHeight = (int)(this.Height * _dpiScaleY);
-
-        if (pixelWidth <= 0 || pixelHeight <= 0) return;
-
-        _writeableBitmap = new WriteableBitmap(
-            pixelWidth,
-            pixelHeight,
-            96 * _dpiScaleX,
-            96 * _dpiScaleY,
-            System.Windows.Media.PixelFormats.Bgra32,
-            null);
-        CapturedImage.Source = _writeableBitmap;
-    }
-
-    private void UpdateBitmap(byte[] pixelData, int width, int height)
-    {
-        if (_writeableBitmap == null ||
-            _writeableBitmap.PixelWidth != width ||
-            _writeableBitmap.PixelHeight != height)
+        Parallel.For(0, pixelData.Length / 4, i =>
         {
-            ReinitializeBitmap();
-        }
+            int idx = i * 4;
+            pixelData[idx] = (byte)(255 - pixelData[idx]);
+            pixelData[idx + 1] = (byte)(255 - pixelData[idx + 1]);
+            pixelData[idx + 2] = (byte)(255 - pixelData[idx + 2]);
+        });
+    }
 
-        if (_writeableBitmap == null) return;
-
-        _writeableBitmap.Lock();
-        try
+    public static void InvertLightnessOnly(byte[] pixelData, int width, int height)
+    {
+        Parallel.For(0, pixelData.Length / 4, i =>
         {
-            Marshal.Copy(pixelData, 0, _writeableBitmap.BackBuffer, pixelData.Length);
-            _writeableBitmap.AddDirtyRect(new Int32Rect(0, 0, width, height));
-        }
-        finally
-        {
-            _writeableBitmap.Unlock();
-        }
-    }
-
-    // --- 交互事件处理 (基本保持不变，除了 MouseLeftButtonUp 不需要强制刷新了) ---
-
-    private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        if (_isLocked) return; // 锁定模式下不处理（其实因为透明也点不到）
-        _isDragging = true;
-        _dragStartPoint = e.GetPosition(this);
-        this.CaptureMouse();
-    }
-
-    private void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
-    {
-        if (_isDragging)
-        {
-            _isDragging = false;
-            this.ReleaseMouseCapture();
-        }
-    }
-
-    private void OnMouseMove(object sender, MouseEventArgs e)
-    {
-        if (_isDragging && !_isLocked)
-        {
-            var currentPoint = e.GetPosition(this);
-            this.Left += currentPoint.X - _dragStartPoint.X;
-            this.Top += currentPoint.Y - _dragStartPoint.Y;
-        }
-    }
-
-    private void ModeButton_Click(object sender, RoutedEventArgs e)
-    {
-        _inversionMode = (_inversionMode + 1) % 2;
-        ModeButton.Content = _inversionMode == 0 ? "模式：全反转" : "模式：亮度反转";
-    }
-
-    private void CloseButton_Click(object sender, RoutedEventArgs e)
-    {
-        _captureTimer.Stop();
-        this.Close();
-    }
-
-    // 调整大小相关 (Thumb 事件)
-    private void OnResizeDragStarted(object sender, System.Windows.Controls.Primitives.DragStartedEventArgs e) => _isResizing = true;
-    private void OnResizeDragCompleted(object sender, System.Windows.Controls.Primitives.DragCompletedEventArgs e) => _isResizing = false;
-
-    // ... (保留原本的 OnTopLeftCornerResize 等调整大小的具体逻辑，此处省略以节省篇幅，保持原样即可) ...
-    // 将原文件中的 Resize 逻辑复制回来
-    private void OnTopLeftCornerResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; var newWidth = Math.Max(100, this.Width - e.HorizontalChange); var newHeight = Math.Max(100, this.Height - e.VerticalChange); this.Width = newWidth; this.Height = newHeight; this.Left += e.HorizontalChange; this.Top += e.VerticalChange; }
-    private void OnTopRightCornerResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; var newWidth = Math.Max(100, this.Width + e.HorizontalChange); var newHeight = Math.Max(100, this.Height - e.VerticalChange); this.Width = newWidth; this.Height = newHeight; this.Top += e.VerticalChange; }
-    private void OnBottomLeftCornerResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; var newWidth = Math.Max(100, this.Width - e.HorizontalChange); var newHeight = Math.Max(100, this.Height + e.VerticalChange); this.Width = newWidth; this.Height = newHeight; this.Left += e.HorizontalChange; }
-    private void OnBottomRightCornerResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; this.Width = Math.Max(100, this.Width + e.HorizontalChange); this.Height = Math.Max(100, this.Height + e.VerticalChange); }
-    private void OnTopEdgeResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; var newHeight = Math.Max(100, this.Height - e.VerticalChange); this.Height = newHeight; this.Top += e.VerticalChange; }
-    private void OnBottomEdgeResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; this.Height = Math.Max(100, this.Height + e.VerticalChange); }
-    private void OnLeftEdgeResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; var newWidth = Math.Max(100, this.Width - e.HorizontalChange); this.Width = newWidth; this.Left += e.HorizontalChange; }
-    private void OnRightEdgeResize(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e) { if(_isLocked) return; this.Width = Math.Max(100, this.Width + e.HorizontalChange); }
-
-    protected override void OnClosed(EventArgs e)
-    {
-        _captureTimer.Stop();
-        _screenCapture.Dispose();
-        base.OnClosed(e);
+            int idx = i * 4;
+            byte b = pixelData[idx];
+            byte g = pixelData[idx + 1];
+            byte r = pixelData[idx + 2];
+            int luma = (r * 77 + g * 150 + b * 29) >> 8;
+            int invertedLuma = 255 - luma;
+            int diff = invertedLuma - luma;
+            int nb = b + diff;
+            int ng = g + diff;
+            int nr = r + diff;
+            pixelData[idx] = (byte)(nb < 0 ? 0 : (nb > 255 ? 255 : nb));
+            pixelData[idx + 1] = (byte)(ng < 0 ? 0 : (ng > 255 ? 255 : ng));
+            pixelData[idx + 2] = (byte)(nr < 0 ? 0 : (nr > 255 ? 255 : nr));
+        });
     }
 }
 ```
 
-### 2\. 修改 `InverterOverlayWindow.xaml`
+### 2\. 显示层修复 (`InverterOverlayWindow.xaml`)
 
-主要是添加了一个 `Name="MainGrid"` 以便代码中控制，并增加了一个用于显示锁定状态提示的文本框。
+解决“小字体像素缺失”的关键在于 `BitmapScalingMode="HighQuality"`。
+如果不设置这个属性，WPF 默认使用线性插值或临近采样，当屏幕截图的分辨率与显示区域哪怕只有 0.5 像素的错位，都会导致细小的笔画（如 i 的点，或者 1 像素宽的表格线）直接消失。
 
 ```xml
 <Window x:Class="ScreenInverter.InverterOverlayWindow"
@@ -394,17 +159,20 @@ public partial class InverterOverlayWindow : Window
         Topmost="True"
         ShowInTaskbar="False"
         WindowStartupLocation="Manual"
-        ResizeMode="NoResize">
+        ResizeMode="NoResize"
+        UseLayoutRounding="True">
 
     <Border x:Name="MainBorder"
             BorderBrush="#40FFFFFF"
             BorderThickness="2"
-            Background="Transparent">
+            Background="Transparent"
+            SnapsToDevicePixels="True">
         <Grid x:Name="MainGrid">
             <Image x:Name="CapturedImage"
                    Stretch="Fill"
                    IsHitTestVisible="False"
-                   RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                   RenderOptions.BitmapScalingMode="HighQuality"
+                   SnapsToDevicePixels="True"/>
 
             <TextBlock x:Name="StatusText"
                        Text="已锁定"
@@ -431,7 +199,6 @@ public partial class InverterOverlayWindow : Window
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                         <ColumnDefinition Width="Auto"/>
-                        <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
 
                     <TextBlock Grid.Column="0"
@@ -443,7 +210,7 @@ public partial class InverterOverlayWindow : Window
 
                     <Button Grid.Column="1"
                             x:Name="ModeButton"
-                            Content="模式：全反转"
+                            Content="模式：智能文档"
                             Click="ModeButton_Click"
                             Foreground="White"
                             Background="#40FFFFFF"
@@ -468,9 +235,35 @@ public partial class InverterOverlayWindow : Window
                    DragStarted="OnResizeDragStarted" DragDelta="OnTopLeftCornerResize" DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
             </Thumb>
-             <Thumb Width="50" Height="50" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+            <Thumb Width="50" Height="50" HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                   Margin="-15,0,0,-15" Cursor="SizeNESW"
+                   DragStarted="OnResizeDragStarted" DragDelta="OnBottomLeftCornerResize" DragCompleted="OnResizeDragCompleted">
+                <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
+            </Thumb>
+            <Thumb Width="50" Height="50" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                    Margin="0,0,-15,-15" Cursor="SizeNWSE"
-                   DragStarted="OnResizeDragStarted" DragDelta="OnBottomRightCornerResize" DragCompleted="OnResizeDragCompleted">
+                   DragStarted="OnResizeDragStarted" DragDelta="OnBottomRightCornerResize" Drag
+```leted="OnResizeDragCompleted">
+                <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
+            </Thumb>
+             <Thumb Height="15" HorizontalAlignment="Stretch" VerticalAlignment="Top"
+                   Margin="0,-15,-150,0" Cursor="SizeNS"
+                   DragStarted="OnResizeDragStarted" DragDelta="OnTopEdgeResize" DragCompleted="OnResizeDragCompleted">
+                <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
+            </Thumb>
+            <Thumb Height="15" HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
+                   Margin="0,0,0,-15" Cursor="SizeNS"
+                   DragStarted="OnResizeDragStarted" DragDelta="OnBottomEdgeResize" DragCompleted="OnResizeDragCompleted">
+                <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
+            </Thumb>
+            <Thumb Width="15" HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                   Margin="-15,0,0,0" Cursor="SizeWE"
+                   DragStarted="OnResizeDragStarted" DragDelta="OnLeftEdgeResize" DragCompleted="OnResizeDragCompleted">
+                <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
+            </Thumb>
+            <Thumb Width="15" HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                   Margin="0,30,0,-15" Cursor="SizeWE"
+                   DragStarted="OnResizeDragStarted" DragDelta="OnRightEdgeResize" DragCompleted="OnResizeDragCompleted">
                 <Thumb.Template><ControlTemplate TargetType="Thumb"><Rectangle Fill="Transparent"/></ControlTemplate></Thumb.Template>
             </Thumb>
 
@@ -479,15 +272,12 @@ public partial class InverterOverlayWindow : Window
 </Window>
 ```
 
-### 修改说明总结
+### 3\. 验证要点
 
-1.  **性能与体验**：使用 `SetWindowDisplayAffinity(..., WDA_EXCLUDEFROMCAPTURE)` 替换了原来的 `Hide -> Capture -> Show` 流程。
-      * **效果**：彻底解决了窗口闪烁问题，因为窗口不再需要物理隐藏。
-2.  **点击穿透**：引入了 `WS_EX_TRANSPARENT` 样式的切换。
-      * **操作**：增加了 `Ctrl + L` 快捷键（在 Timer 中检测，无需复杂 Hook）。
-      * **逻辑**：按下 `Ctrl + L` 后，窗口变为"隐形人"（鼠标可穿透），同时隐藏所有 UI 控件，只保留反色画面。再次按下恢复控制。
-3.  **代码优化**：
-      * 使用了 `WriteableBitmap` 的 `BackBuffer` 直接内存拷贝，比原来的 `WritePixels` 稍微高效一点点（虽然原来的也够用了）。
-      * 将耗时的 `InvertColors` 算法放到了 `Task.Run` 中，避免阻塞 UI 线程（虽然之前也在 Timer 回调里，但这样更明确）。
+应用上述两份代码后，你应该能观察到以下变化：
 
-请将上述代码替换对应文件即可。请确保项目引用了 `System.Windows.Forms` (在 .csproj 中已有 `UseWindowsForms`) 以支持 `VirtualScreen` 获取。
+1.  **字体清晰度**：即使在窗口尺寸不完美匹配像素时，文字也不再断裂（归功于 XAML 中的 `BitmapScalingMode="HighQuality"`）。
+2.  **边缘平滑**：白底黑字的网页，放大的时候边缘不再有红/蓝色的杂色噪点。ClearType 的彩色子像素现在被正确地反转亮度，变成了极淡的色彩，融入了白色的文字笔画中（归功于 C\# 中的 `isBrightImage` 亮度+饱和度双重判定）。
+3.  **深色控件可见**：原本深蓝色的超链接，现在会变成浅蓝色，在黑背景上清晰可见（不再因为是“彩色”而被保留为深蓝色，导致看不清）。
+
+其他文件（如 `InverterOverlayWindow.xaml.cs` 和 `ScreenCapture.cs`）你提供的版本已经包含了 DPI 修正和 `SetWindowDisplayAffinity`，这些是正确的，无需更改。
