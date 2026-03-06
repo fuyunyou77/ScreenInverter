@@ -11,17 +11,15 @@ public class ScreenCapture : IDisposable
 {
     private bool _disposed;
 
-    public int ScreenWidth { get; private set; }
-    public int ScreenHeight { get; private set; }
-
     public void Initialize()
     {
-        ScreenWidth = SystemInformation.VirtualScreen.Width;
-        ScreenHeight = SystemInformation.VirtualScreen.Height;
+        // 留空即可。已经不再需要缓存 VirtualScreen 尺寸，
+        // 传递给 CaptureRegion 的物理坐标已经是最准确的。
     }
 
     /// <summary>
     /// 捕获指定区域的屏幕内容
+    /// 参数 x, y 均为屏幕绝对物理坐标
     /// </summary>
     public Bitmap? CaptureRegion(int x, int y, int width, int height)
     {
