@@ -18,6 +18,9 @@ public class AppSettings
     // DPI 缩放比例设置 (对应 Windows 系统设置里的 100%, 125%, 150% 等)
     public string DpiScaleMode { get; set; } = "Auto";
     public double CustomDpiScale { get; set; } = 100;
+
+    // 关闭行为设置 (MinimizeToTray 或 Exit)
+    public string CloseBehavior { get; set; } = "MinimizeToTray";
 }
 
 public static class SettingsManager

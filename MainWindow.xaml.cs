@@ -58,6 +58,19 @@ public partial class MainWindow : Window
             }
         }
         TxtDpiScale.Text = SettingsManager.Current.CustomDpiScale.ToString();
+
+        // 回显关闭行为
+        foreach (ComboBoxItem item in CmbCloseBehavior.Items)
+        {
+            if (item.Tag.ToString() == SettingsManager.Current.CloseBehavior)
+            {
+                CmbCloseBehavior.SelectedItem = item;
+                break;
+            }
+        }
+
+        // 根据 DPI 设置更新分辨率下拉框的启用状态
+        UpdateResolutionEnabled();
     }
 
     private void CmbResolution_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -72,6 +85,18 @@ public partial class MainWindow : Window
         if (PanelCustomDpi == null) return;
         PanelCustomDpi.Visibility = (CmbDpiScale.SelectedItem is ComboBoxItem item && item.Tag.ToString() == "Custom")
             ? Visibility.Visible : Visibility.Collapsed;
+
+        // 根据 DPI 设置更新分辨率下拉框的启用状态
+        UpdateResolutionEnabled();
+    }
+
+    private void UpdateResolutionEnabled()
+    {
+        // 当 DPI 为 Auto 时启用分辨率选项，否则禁用
+        if (CmbDpiScale.SelectedItem is ComboBoxItem dpiItem)
+        {
+            CmbResolution.IsEnabled = dpiItem.Tag.ToString() == "Auto";
+        }
     }
 
     private void SaveButton_Click(object sender, RoutedEventArgs e)
@@ -84,6 +109,7 @@ public partial class MainWindow : Window
             SettingsManager.Current.ShortcutName = modStr + ((KeyValuePair<string, int>)CmbActionKey.SelectedItem).Key;
         }
 
+        // 保存分辨率（只有在 DPI 为 Auto 时才生效）
         if (CmbResolution.SelectedItem is ComboBoxItem resItem)
         {
             SettingsManager.Current.ResolutionMode = resItem.Tag.ToString() ?? "Auto";
@@ -95,6 +121,7 @@ public partial class MainWindow : Window
             }
         }
 
+        // 保存 DPI 缩放比例
         if (CmbDpiScale.SelectedItem is ComboBoxItem dpiItem)
         {
             SettingsManager.Current.DpiScaleMode = dpiItem.Tag.ToString() ?? "Auto";
@@ -104,8 +131,13 @@ public partial class MainWindow : Window
             }
         }
 
+        // 保存关闭行为
+        if (CmbCloseBehavior.SelectedItem is ComboBoxItem closeItem)
+        {
+            SettingsManager.Current.CloseBehavior = closeItem.Tag.ToString() ?? "MinimizeToTray";
+        }
+
         SettingsManager.Save();
-        WpfMessageBox.Show("设置已保存！\n分辨率和缩放修改将在遮罩窗口实时生效。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
     }
 
     private void ToggleOverlayButton_Click(object sender, RoutedEventArgs e)
@@ -118,7 +150,9 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
-        e.Cancel = true;
-        this.Hide();
+        if (WpfApplication.Current is App app)
+        {
+            app.HandleMainWindowClosing(this, e);
+        }
     }
 }

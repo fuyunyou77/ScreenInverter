@@ -1,297 +1,19 @@
-你观察得非常敏锐！这正是 Windows 处理多显示器和 DPI 缩放时最容易让人迷惑的地方。
+这是一个非常敏锐的发现！你完美触及了 Windows WPF 坐标系在多显示器开发中最容易踩的一个“深坑”。
 
-现象的本质是：**WPF 操作的是逻辑像素，而截屏代码需要的是物理像素。**
-在你的 2K 显示器且 **100% 缩放**下，逻辑像素刚好等于物理像素（倍率为 1.0）。在之前的代码中，"1080p" 的选项对应的映射倍率就是 1.0，所以你选 1080p 反而是“完美对齐”的。当你选择 "2K" 时，代码强行乘以了 `1.33`（2560/1920）的倍率，这就导致截屏去抓取了 1.33 倍的超大区域，然后再强行挤进窗口里，看起来就像是内容被“缩小”了。
+### 为什么会发生这种情况？
 
-为了彻底解决这个问题，我为你添加了**显示器分辨率**和**系统缩放比例 (DPI)**的双重控制选项，以完美贴合 Windows 系统设置。
+根本原因在于：**WPF 的底层是以“逻辑像素（DIP）”运作的，它的坐标映射比例只受“DPI 缩放”影响，而与显示器的“物理分辨率（1080p/2K/4K）”毫无关系。**
 
-此外，我大幅重构了“自动获取”逻辑，利用 WPF 原生的底层 API `PointToScreen`。它能自动穿透 Windows 的虚拟化屏障，完美计算任何显示器组合和缩放比例的真实物理坐标。极大概。极大概率你现在只需要选择“自动获取 (推荐)”，就能在任意屏幕间自由拖拽。
+1. **100% 缩放的真相**：在你的 2K 显示器（100% 缩放）上，1 个 WPF 逻辑像素完全等于 1 个屏幕物理像素。也就是说，对截屏 API 而言，正确的映射倍率应该是 **1.0**。
+2. **之前的代码 Bug**：在上一版代码中，我将“分辨率倍数”和“DPI 倍数”做了**相乘**。当你选择了 2K（代码内部将其算作 `2560/1920 = 1.33`）和 100% 缩放（`1.0`）时，最终的倍率变成了 `1.33 * 1.0 = 1.33`。
+3. **视觉表现**：因为倍率变成了 1.33，软件去截取了比窗口实际面积大 1.33 倍的物理屏幕区域，然后强行塞回原来的窗口里。这就导致了你看到的“画面缩小，但包含了更多内容”的现象。而选 1080p（倍率 1.0）或 2K 75%（`1.33 * 0.75 ≈ 1.0`）刚好歪打正着把倍率抵消回了 1.0，所以反而显示正常。
 
-以下是修改后的完整类实现：
+### 修复方案
 
-### 1\. SettingsManager.cs
+我们需要**解除分辨率和 DPI 的强制绑定**。在手动计算坐标时，将 **DPI 缩放比例** 设为绝对主导。只要明确选择了 DPI（比如 100%），程序就严格按照这个 DPI 比例进行 1:1 映射，直接忽略那个会引发错误的分辨率乘数。
 
-增加分别针对“分辨率”和“DPI缩放比例”的配置存储。
-
-```csharp
-using System.IO;
-using System.Text.Json;
-
-namespace ScreenInverter;
-
-public class AppSettings
-{
-    // 快捷键设置
-    public int ModifierKey { get; set; } = 0x11;
-    public int ActionKey { get; set; } = 0x4C;
-    public string ShortcutName { get; set; } = "Ctrl+L";
-
-    // 分辨率适配设置
-    public string ResolutionMode { get; set; } = "Auto";
-    public double CustomResW { get; set; } = 1920;
-    public double CustomResH { get; set; } = 1080;
-
-    // DPI 缩放比例设置 (对应 Windows 系统设置里的 100%, 125%, 150% 等)
-    public string DpiScaleMode { get; set; } = "Auto";
-    public double CustomDpiScale { get; set; } = 100;
-}
-
-public static class SettingsManager
-{
-    private static readonly string Path = "config.json";
-    public static AppSettings Current { get; private set; } = new AppSettings();
-
-    public static void Load()
-    {
-        if (File.Exists(Path))
-        {
-            try
-            {
-                string json = File.ReadAllText(Path);
-                Current = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
-            }
-            catch { Current = new AppSettings(); }
-        }
-    }
-
-    public static void Save()
-    {
-        try
-        {
-            string json = JsonSerializer.Serialize(Current, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(Path, json);
-        }
-        catch { }
-    }
-}
-```
-
------
-
-### 2\. MainWindow.xaml
-
-增加缩放比例的下拉框和自定义界面，对齐 Windows 系统设置逻辑。
-
-```xml
-<Window x:Class="ScreenInverter.MainWindow"
-        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="屏幕颜色反转器 - 设置"
-        Height="420" Width="450"
-        WindowStartupLocation="CenterScreen"
-        ResizeMode="NoResize"
-        Closing="Window_Closing">
-    <Grid Margin="20">
-        <StackPanel>
-            <TextBlock Text="控制面板"
-                       FontSize="20"
-                       FontWeight="Bold"
-                       HorizontalAlignment="Center"
-                       Margin="0,0,0,15"/>
-
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,15">
-                <TextBlock Text="穿透快捷键：" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox x:Name="CmbModifier" Width="70" DisplayMemberPath="Key" SelectedValuePath="Value"/>
-                <TextBlock Text=" + " VerticalAlignment="Center" Margin="5,0"/>
-                <ComboBox x:Name="CmbActionKey" Width="70" DisplayMemberPath="Key" SelectedValuePath="Value"/>
-            </StackPanel>
-
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,5">
-                <TextBlock Text="显示器分辨率：" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox x:Name="CmbResolution" Width="180" SelectionChanged="CmbResolution_SelectionChanged">
-                    <ComboBoxItem Content="自动获取 (推荐)" Tag="Auto"/>
-                    <ComboBoxItem Content="1080p (1920x1080)" Tag="1080p"/>
-                    <ComboBoxItem Content="2K (2560x1440)" Tag="2K"/>
-                    <ComboBoxItem Content="4K (3840x2160)" Tag="4K"/>
-                    <ComboBoxItem Content="自定义分辨率..." Tag="Custom"/>
-                </ComboBox>
-            </StackPanel>
-
-            <StackPanel x:Name="PanelCustomRes" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,10" Visibility="Collapsed">
-                <TextBox x:Name="TxtResW" Width="60" TextAlignment="Center" VerticalContentAlignment="Center"/>
-                <TextBlock Text=" × " VerticalAlignment="Center" Margin="5,0"/>
-                <TextBox x:Name="TxtResH" Width="60" TextAlignment="Center" VerticalContentAlignment="Center"/>
-            </StackPanel>
-
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,5">
-                <TextBlock Text="系统缩放比例：" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox x:Name="CmbDpiScale" Width="180" SelectionChanged="CmbDpiScale_SelectionChanged">
-                    <ComboBoxItem Content="自动获取 (推荐)" Tag="Auto"/>
-                    <ComboBoxItem Content="100%" Tag="100"/>
-                    <ComboBoxItem Content="125%" Tag="125"/>
-                    <ComboBoxItem Content="150%" Tag="150"/>
-                    <ComboBoxItem Content="175%" Tag="175"/>
-                    <ComboBoxItem Content="200%" Tag="200"/>
-                    <ComboBoxItem Content="自定义比例..." Tag="Custom"/>
-                </ComboBox>
-            </StackPanel>
-
-            <StackPanel x:Name="PanelCustomDpi" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,15" Visibility="Collapsed">
-                <TextBox x:Name="TxtDpiScale" Width="60" TextAlignment="Center" VerticalContentAlignment="Center"/>
-                <TextBlock Text=" %" VerticalAlignment="Center" Margin="5,0"/>
-            </StackPanel>
-
-            <Button Content="保存所有设置"
-                    Click="SaveButton_Click"
-                    Padding="10,5"
-                    Width="150"
-                    Margin="0,10,0,15"/>
-
-            <Button Content="开启 / 关闭反转遮罩"
-                    Click="ToggleOverlayButton_Click"
-                    Padding="20,10"
-                    FontSize="14"
-                    Background="#2080D0"
-                    Foreground="White"/>
-
-            <TextBlock Text="提示：关闭此窗口软件仍会在托盘后台运行"
-                       HorizontalAlignment="Center"
-                       Margin="0,15,0,0"
-                       Foreground="#888"
-                       FontSize="11"/>
-        </StackPanel>
-    </Grid>
-</Window>
-```
-
------
-
-### 3\. MainWindow.xaml.cs
-
-处理下拉框显示、隐藏和数据的持久化存储。
-
-```csharp
-using System.Collections.Generic;
-using System.Windows;
-using System.Windows.Controls;
-using WpfMessageBox = System.Windows.MessageBox;
-using WpfApplication = System.Windows.Application;
-
-namespace ScreenInverter;
-
-public partial class MainWindow : Window
-{
-    public MainWindow()
-    {
-        InitializeComponent();
-        LoadSettingsToUI();
-    }
-
-    private void LoadSettingsToUI()
-    {
-        // 绑定修饰键
-        var modifiers = new List<KeyValuePair<string, int>>
-        {
-            new("无", 0),
-            new("Ctrl", 0x11),
-            new("Alt", 0x12),
-            new("Shift", 0x10)
-        };
-        CmbModifier.ItemsSource = modifiers;
-
-        var actionKeys = new List<KeyValuePair<string, int>>();
-        for (int i = 0x41; i <= 0x5A; i++)
-        {
-            actionKeys.Add(new KeyValuePair<string, int>(((char)i).ToString(), i));
-        }
-        CmbActionKey.ItemsSource = actionKeys;
-
-        CmbModifier.SelectedValue = SettingsManager.Current.ModifierKey;
-        CmbActionKey.SelectedValue = SettingsManager.Current.ActionKey;
-
-        // 回显分辨率
-        foreach (ComboBoxItem item in CmbResolution.Items)
-        {
-            if (item.Tag.ToString() == SettingsManager.Current.ResolutionMode)
-            {
-                CmbResolution.SelectedItem = item;
-                break;
-            }
-        }
-        TxtResW.Text = SettingsManager.Current.CustomResW.ToString();
-        TxtResH.Text = SettingsManager.Current.CustomResH.ToString();
-
-        // 回显缩放比例
-        foreach (ComboBoxItem item in CmbDpiScale.Items)
-        {
-            if (item.Tag.ToString() == SettingsManager.Current.DpiScaleMode)
-            {
-                CmbDpiScale.SelectedItem = item;
-                break;
-            }
-        }
-        TxtDpiScale.Text = SettingsManager.Current.CustomDpiScale.ToString();
-    }
-
-    private void CmbResolution_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (PanelCustomRes == null) return;
-        PanelCustomRes.Visibility = (CmbResolution.SelectedItem is ComboBoxItem item && item.Tag.ToString() == "Custom") 
-            ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void CmbDpiScale_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (PanelCustomDpi == null) return;
-        PanelCustomDpi.Visibility = (CmbDpiScale.SelectedItem is ComboBoxItem item && item.Tag.ToString() == "Custom") 
-            ? Visibility.Visible : Visibility.Collapsed;
-    }
-
-    private void SaveButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (CmbModifier.SelectedValue is int mod && CmbActionKey.SelectedValue is int act)
-        {
-            SettingsManager.Current.ModifierKey = mod;
-            SettingsManager.Current.ActionKey = act;
-            string modStr = mod == 0 ? "" : ((KeyValuePair<string, int>)CmbModifier.SelectedItem).Key + "+";
-            SettingsManager.Current.ShortcutName = modStr + ((KeyValuePair<string, int>)CmbActionKey.SelectedItem).Key;
-        }
-
-        if (CmbResolution.SelectedItem is ComboBoxItem resItem)
-        {
-            SettingsManager.Current.ResolutionMode = resItem.Tag.ToString() ?? "Auto";
-            if (SettingsManager.Current.ResolutionMode == "Custom" && 
-                double.TryParse(TxtResW.Text, out double w) && double.TryParse(TxtResH.Text, out double h))
-            {
-                SettingsManager.Current.CustomResW = w;
-                SettingsManager.Current.CustomResH = h;
-            }
-        }
-
-        if (CmbDpiScale.SelectedItem is ComboBoxItem dpiItem)
-        {
-            SettingsManager.Current.DpiScaleMode = dpiItem.Tag.ToString() ?? "Auto";
-            if (SettingsManager.Current.DpiScaleMode == "Custom" && double.TryParse(TxtDpiScale.Text, out double customDpi))
-            {
-                SettingsManager.Current.CustomDpiScale = customDpi;
-            }
-        }
-
-        SettingsManager.Save();
-        WpfMessageBox.Show("设置已保存！\n分辨率和缩放修改将在遮罩窗口实时生效。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
-    }
-
-    private void ToggleOverlayButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (WpfApplication.Current is App app)
-        {
-            app.ToggleOverlay();
-        }
-    }
-
-    private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
-    {
-        e.Cancel = true;
-        this.Hide();
-    }
-}
-```
-
------
-
-### 4\. InverterOverlayWindow.xaml.cs (核心渲染逻辑更新)
-
-移除容易出现坐标系偏差的 `GetWindowRect`，引入完美适配多屏幕/多DPI的高级转换 API `PointToScreen`，同时融合了手动双重计算模式。
+以下
+以下是修改后的 `InverterOverlayWindow.xaml.cs` 完整实现（仅核心计算逻辑有变，其他文件维持不变即可正常运作）：
 
 ```csharp
 using System;
@@ -473,8 +195,7 @@ public partial class InverterOverlayWindow : Window
 
                 if (resMode == "Auto" && dpiMode == "Auto")
                 {
-                    // 终极解法：使用 WPF 内部的物理屏幕映射体系
-                    // PointToScreen 会完美将逻辑坐标映射到多显示器下的绝对物理坐标
+                    // 自动模式：使用 WPF 内部机制推算，最稳定
                     Dispatcher.Invoke(() =>
                     {
                         try
@@ -490,31 +211,36 @@ public partial class InverterOverlayWindow : Window
                                 physicalH = (int)Math.Round(bottomRight.Y - topLeft.Y);
                             }
                         }
-                        catch { /* 忽略初始化尚未彻底完成时的偶发异常 */ }
+                        catch { }
                     });
                 }
                 else
                 {
-                    // 用户强制指定补偿比例
+                    // 手动模式
                     double finalScaleX = 1.0;
                     double finalScaleY = 1.0;
 
-                    // 1. 分辨率倍数
-                    if (resMode == "1080p") { finalScaleX *= 1.0; finalScaleY *= 1.0; }
-                    else if (resMode == "2K") { finalScaleX *= 2560.0 / 1920.0; finalScaleY *= 1440.0 / 1080.0; }
-                    else if (resMode == "4K") { finalScaleX *= 3840.0 / 1920.0; finalScaleY *= 2160.0 / 1080.0; }
-                    else if (resMode == "Custom") { finalScaleX *= customW / 1920.0; finalScaleY *= customH / 1080.0; }
-
-                    // 2. DPI 缩放倍数
-                    if (dpiMode != "Auto" && dpiMode != "Custom" && double.TryParse(dpiMode, out double dpiVal))
+                    // 【核心修复】只要设置了 DPI，就以 DPI 为绝对准则，丢弃物理分辨率的错误乘数
+                    if (dpiMode != "Auto")
                     {
-                        finalScaleX *= dpiVal / 100.0;
-                        finalScaleY *= dpiVal / 100.0;
+                        if (dpiMode == "Custom")
+                        {
+                            finalScaleX = customDpi / 100.0;
+                            finalScaleY = customDpi / 100.0;
+                        }
+                        else if (double.TryParse(dpiMode, out double dpiVal))
+                        {
+                            finalScaleX = dpiVal / 100.0;
+                            finalScaleY = dpiVal / 100.0;
+                        }
                     }
-                    else if (dpiMode == "Custom")
+                    else if (resMode != "Auto")
                     {
-                        finalScaleX *= customDpi / 100.0;
-                        finalScaleY *= customDpi / 100.0;
+                        // 降级兼容：只有在 DPI 处于 Auto 的情况下，才退回使用分辨率进行粗略倍率推算
+                        if (resMode == "1080p") { finalScaleX = 1.0; finalScaleY = 1.0; }
+                        else if (resMode == "2K") { finalScaleX = 2560.0 / 1920.0; finalScaleY = 1440.0 / 1080.0; }
+                        else if (resMode == "4K") { finalScaleX = 3840.0 / 1920.0; finalScaleY = 2160.0 / 1080.0; }
+                        else if (resMode == "Custom") { finalScaleX = customW / 1920.0; finalScaleY = customH / 1080.0; }
                     }
 
                     Dispatcher.Invoke(() =>
@@ -711,3 +437,5 @@ public partial class InverterOverlayWindow : Window
     }
 }
 ```
+
+需要我修改 `MainWindow.xaml.cs` 中的 UI 逻辑，当用户在下拉框中选择具体的“系统 DPI 缩放比例”时，自动禁用并灰掉“显示器分辨率”选项，以避免未来的用户产生同样的误解吗？

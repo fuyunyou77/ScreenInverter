@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="屏幕颜色反转器 - 设置"
-        Height="420" Width="450"
+        Height="480" Width="480"
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
         Closing="Window_Closing">
@@ -21,9 +21,16 @@
                 <ComboBox x:Name="CmbActionKey" Width="70" DisplayMemberPath="Key" SelectedValuePath="Value"/>
             </StackPanel>
 
+            <Border Background="#FFF3CD" BorderBrush="#FFC107" BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,15">
+                <TextBlock Text="💡 提示：WPF 坐标系只与 DPI 缩放相关。&#10;请选择「系统缩放比例」，分辨率设置通常无需操作。"
+                           FontSize="12"
+                           Foreground="#856404"
+                           TextWrapping="Wrap"/>
+            </Border>
+
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,5">
                 <TextBlock Text="显示器分辨率：" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                <ComboBox x:Name="CmbResolution" Width="180" SelectionChanged="CmbResolution_SelectionChanged">
+                <ComboBox x:Name="CmbResolution" Width="180" SelectionChanged="CmbResolution_SelectionChanged" IsEnabled="False">
                     <ComboBoxItem Content="自动获取 (推荐)" Tag="Auto"/>
                     <ComboBoxItem Content="1080p (1920x1080)" Tag="1080p"/>
                     <ComboBoxItem Content="2K (2560x1440)" Tag="2K"/>
@@ -56,7 +63,15 @@
                 <TextBlock Text=" %" VerticalAlignment="Center" Margin="5,0"/>
             </StackPanel>
 
-            <Button Content="保存所有设置"
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,5,0,15">
+                <TextBlock Text="关闭行为：" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <ComboBox x:Name="CmbCloseBehavior" Width="200">
+                    <ComboBoxItem Content="最小化到系统托盘" Tag="MinimizeToTray"/>
+                    <ComboBoxItem Content="直接退出程序" Tag="Exit"/>
+                </ComboBox>
+            </StackPanel>
+
+            <Button Content="保存并应用所有设置"
                     Click="SaveButton_Click"
                     Padding="10,5"
                     Width="150"

@@ -79,4 +79,20 @@ public partial class App : System.Windows.Application
         }
         System.Windows.Application.Current.Shutdown();
     }
+
+    // 处理主窗口关闭事件，根据配置决定是退出还是最小化到托盘
+    public void HandleMainWindowClosing(MainWindow window, System.ComponentModel.CancelEventArgs e)
+    {
+        if (SettingsManager.Current.CloseBehavior == "Exit")
+        {
+            // 直接退出程序
+            ExitApplication();
+        }
+        else
+        {
+            // 最小化到托盘（隐藏窗口）
+            e.Cancel = true;
+            window.Hide();
+        }
+    }
 }

@@ -35,7 +35,7 @@ public partial class InverterOverlayWindow : Window
     private readonly ScreenCapture _screenCapture;
     private WriteableBitmap? _writeableBitmap;
     private bool _isResizing;
-    private int _inversionMode;
+    private int _inversionMode = 1; // 默认模式：强力全反
     private readonly DispatcherTimer _captureTimer;
     private bool _isCapturing;
     private bool _isLocked = false;
@@ -59,12 +59,44 @@ public partial class InverterOverlayWindow : Window
 
         this.MouseLeftButtonDown += OnMouseLeftButtonDown;
 
+        // 初始化模式按钮文本为默认值（强力全反）
+        ModeButton.Content = "模式：强力全反";
+
+        // 初始化 DPI 缩放下拉框
+        InitDpiScaleComboBox();
+
         _captureTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(33)
         };
         _captureTimer.Tick += TimerTick;
         _captureTimer.Start();
+    }
+
+    private void InitDpiScaleComboBox()
+    {
+        // 根据当前设置选中对应的 DPI 选项
+        string dpiMode = SettingsManager.Current.DpiScaleMode;
+        foreach (ComboBoxItem item in CmbDpiScale.Items)
+        {
+            if (item.Tag.ToString() == dpiMode)
+            {
+                CmbDpiScale.SelectedItem = item;
+                return;
+            }
+        }
+        // 如果没有匹配，默认选自动
+        CmbDpiScale.SelectedIndex = 0;
+    }
+
+    private void CmbDpiScale_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (CmbDpiScale.SelectedItem is ComboBoxItem selectedItem)
+        {
+            string dpiMode = selectedItem.Tag.ToString() ?? "Auto";
+            SettingsManager.Current.DpiScaleMode = dpiMode;
+            SettingsManager.Save();
+        }
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
@@ -118,6 +150,9 @@ public partial class InverterOverlayWindow : Window
             ResizeThumbsVisibility(Visibility.Collapsed);
             StatusText.Visibility = Visibility.Visible;
             StatusText.Text = $"已锁定。按 {SettingsManager.Current.ShortcutName} 解锁";
+            
+            LockIcon.Text = "🔒";
+            LockButton.ToolTip = "点击解锁";
 
             Task.Delay(3000).ContinueWith(_ => Dispatcher.Invoke(() => StatusText.Visibility = Visibility.Collapsed));
         }
@@ -129,7 +164,15 @@ public partial class InverterOverlayWindow : Window
             ControlBar.Visibility = Visibility.Visible;
             ResizeThumbsVisibility(Visibility.Visible);
             StatusText.Visibility = Visibility.Collapsed;
+            
+            LockIcon.Text = "🔓";
+            LockButton.ToolTip = "点击锁定";
         }
+    }
+
+    private void LockButton_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleLockState();
     }
 
     private void ResizeThumbsVisibility(Visibility v)
@@ -177,8 +220,7 @@ public partial class InverterOverlayWindow : Window
 
                 if (resMode == "Auto" && dpiMode == "Auto")
                 {
-                    // 终极解法：使用 WPF 内部的物理屏幕映射体系
-                    // PointToScreen 会完美将逻辑坐标映射到多显示器下的绝对物理坐标
+                    // 自动模式：使用 WPF 内部机制推算，最稳定
                     Dispatcher.Invoke(() =>
                     {
                         try
@@ -194,31 +236,36 @@ public partial class InverterOverlayWindow : Window
                                 physicalH = (int)Math.Round(bottomRight.Y - topLeft.Y);
                             }
                         }
-                        catch { /* 忽略初始化尚未彻底完成时的偶发异常 */ }
+                        catch { }
                     });
                 }
                 else
                 {
-                    // 用户强制指定补偿比例
+                    // 手动模式
                     double finalScaleX = 1.0;
                     double finalScaleY = 1.0;
 
-                    // 1. 分辨率倍数
-                    if (resMode == "1080p") { finalScaleX *= 1.0; finalScaleY *= 1.0; }
-                    else if (resMode == "2K") { finalScaleX *= 2560.0 / 1920.0; finalScaleY *= 1440.0 / 1080.0; }
-                    else if (resMode == "4K") { finalScaleX *= 3840.0 / 1920.0; finalScaleY *= 2160.0 / 1080.0; }
-                    else if (resMode == "Custom") { finalScaleX *= customW / 1920.0; finalScaleY *= customH / 1080.0; }
-
-                    // 2. DPI 缩放倍数
-                    if (dpiMode != "Auto" && dpiMode != "Custom" && double.TryParse(dpiMode, out double dpiVal))
+                    // 【核心修复】只要设置了 DPI，就以 DPI 为绝对准则，丢弃物理分辨率的错误乘数
+                    if (dpiMode != "Auto")
                     {
-                        finalScaleX *= dpiVal / 100.0;
-                        finalScaleY *= dpiVal / 100.0;
+                        if (dpiMode == "Custom")
+                        {
+                            finalScaleX = customDpi / 100.0;
+                            finalScaleY = customDpi / 100.0;
+                        }
+                        else if (double.TryParse(dpiMode, out double dpiVal))
+                        {
+                            finalScaleX = dpiVal / 100.0;
+                            finalScaleY = dpiVal / 100.0;
+                        }
                     }
-                    else if (dpiMode == "Custom")
+                    else if (resMode != "Auto")
                     {
-                        finalScaleX *= customDpi / 100.0;
-                        finalScaleY *= customDpi / 100.0;
+                        // 降级兼容：只有在 DPI 处于 Auto 的情况下，才退回使用分辨率进行粗略倍率推算
+                        if (resMode == "1080p") { finalScaleX = 1.0; finalScaleY = 1.0; }
+                        else if (resMode == "2K") { finalScaleX = 2560.0 / 1920.0; finalScaleY = 1440.0 / 1080.0; }
+                        else if (resMode == "4K") { finalScaleX = 3840.0 / 1920.0; finalScaleY = 2160.0 / 1080.0; }
+                        else if (resMode == "Custom") { finalScaleX = customW / 1920.0; finalScaleY = customH / 1080.0; }
                     }
 
                     Dispatcher.Invoke(() =>
