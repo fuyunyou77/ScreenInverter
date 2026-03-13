@@ -1,10 +1,15 @@
 using System;
+using System.IO;
+using System.Threading;
 using System.Windows;
 using Forms = System.Windows.Forms;
 using Drawing = System.Drawing;
 
 namespace ScreenInverter;
 
+/// <summary>
+/// Interaction logic for App.xaml
+/// </summary>
 public partial class App : System.Windows.Application
 {
     private Forms.NotifyIcon? _notifyIcon;
@@ -15,6 +20,11 @@ public partial class App : System.Windows.Application
     {
         base.OnStartup(e);
 
+        // --- 全局异常捕获 ---
+        this.DispatcherUnhandledException += App_DispatcherUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
+
         // 加载配置
         SettingsManager.Load();
 
@@ -23,6 +33,40 @@ public partial class App : System.Windows.Application
 
         // 启动时默认打开设置窗口
         ShowMainWindow();
+    }
+
+    private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
+    {
+        LogCrash(e.Exception, "DispatcherUnhandledException");
+        e.Handled = true;
+        System.Windows.MessageBox.Show($"软件发生崩溃 (UI Thread):\n{e.Exception.Message}\n请查看程序目录下的 crash_log.txt", "崩溃提示", MessageBoxButton.OK, MessageBoxImage.Error);
+    }
+
+    private void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+    {
+        if (e.ExceptionObject is Exception ex)
+        {
+            LogCrash(ex, "AppDomain UnhandledException");
+            System.Windows.MessageBox.Show($"软件发生致命崩溃 (Background Thread):\n{ex.Message}\n请查看程序目录下的 crash_log.txt", "致命错误", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void TaskScheduler_UnobservedTaskException(object? sender, System.Threading.Tasks.UnobservedTaskExceptionEventArgs e)
+    {
+        if (e.Exception != null)
+        {
+            LogCrash(e.Exception, "UnobservedTaskException");
+            e.SetObserved();
+        }
+    }
+
+    private void LogCrash(Exception ex, string source)
+    {
+        try
+        {
+            File.AppendAllText("crash_log.txt", $"[{DateTime.Now}] [{source}]\n{ex}\n\n");
+        }
+        catch { }
     }
 
     private void InitializeTrayIcon()
