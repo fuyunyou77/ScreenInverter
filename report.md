@@ -1,7 +1,7 @@
 # ScreenInverter 项目开发报告
 
-**生成日期**: 2026-03-05
-**项目版本**: v1.0
+**生成日期**: 2026-03-13
+**项目版本**: v3.0
 **技术栈**: .NET 8.0 WPF / C#
 
 ---
@@ -14,8 +14,10 @@
 - 三种颜色反转模式（智能文档/强力全反/仅反亮度）
 - 系统托盘后台运行
 - 自定义全局快捷键
-- 鼠标穿透/锁定模式
+- 鼠标穿透/锁定模式（含浮动锁定按钮）
 - DPI 感知 / 多显示器支持
+- 可配置关闭行为（最小化到托盘 / 直接退出）
+- DPI 缩放快捷选择（覆盖窗口顶部下拉框）
 
 ---
 
@@ -26,24 +28,25 @@
 - [x] DPI 感知配置 (Per-Monitor V2)
 - [x] 多显示器支持 (使用 VirtualScreen)
 - [x] 系统托盘支持 (Windows Forms NotifyIcon)
+- [x] 应用清单文件 (app.manifest)
 
 ### 2. 屏幕捕获 ✅
 - [x] GDI+ 屏幕捕获 (`Graphics.CopyFromScreen`)
 - [x] 指定区域捕获
-- [x] DPI 缩放适配
+- [x] DPI 缩放适配（自动模式 + 手动模式）
 - [x] 使用 `SetWindowDisplayAffinity` 排除窗口自身捕获
 
 ### 3. 颜色反转（三种模式）✅
 
-#### 模式 1: 智能文档模式（推荐）
+#### 模式 1: 智能文档模式
 | 特性 | 说明 |
 |------|------|
 | 算法 | 亮度/饱和度双阈值判定 |
-| 公式 | `luma = 0.299R + 0.587G + 0.114B` |
+| 公式 | `luma = (R*77 + G*150 + B*29) >> 8` |
 | 判定 | `(sat > 40) && (luma > 140)` → 图片区域 |
 | 效果 | 白底→深灰、黑字→灰白、彩色图片保留 |
 
-#### 模式 2: 强力全反模式（柔和版）
+#### 模式 2: 强力全反模式（柔和版）— 默认模式
 | 特性 | 说明 |
 |------|------|
 | 算法 | RGB 通道独立柔和反转 |
@@ -61,10 +64,14 @@
 - [x] 双击打开设置窗口
 - [x] 右键菜单：开启/关闭遮罩、设置、完全退出
 - [x] 关闭主窗口后后台运行
+- [x] 可配置关闭行为（最小化到托盘 / 直接退出）
 
 ### 5. 全局配置系统 ✅
 - [x] JSON 配置文件 (`config.json`)
 - [x] 自定义快捷键（修饰键 + 字母键）
+- [x] 分辨率模式配置（Auto/1080p/2K/4K/自定义）
+- [x] DPI 缩放比例配置（Auto/100%/125%/150%/175%/200%/自定义）
+- [x] 关闭行为配置（MinimizeToTray/Exit）
 - [x] 配置持久化存储
 - [x] 动态生效（无需重启）
 
@@ -72,9 +79,12 @@
 - [x] 透明顶层窗口
 - [x] 拖动移动窗口
 - [x] 8 个方向的调整大小手柄
-- [x] 控制栏（模式切换、关闭按钮）
+- [x] 控制栏（DPI 选择、模式切换、关闭按钮）
 - [x] 锁定模式（穿透模式）
 - [x] 鼠标穿透（`WS_EX_TRANSPARENT`）
+- [x] 浮动锁定按钮（可被鼠标点击，即使穿透状态）
+- [x] 锁定按钮拖动移动窗口
+- [x] 锁定状态鼠标位置轮询（50ms 间隔）
 
 ---
 
@@ -85,10 +95,6 @@
 
 **解决方案**:
 ```csharp
-// 使用 ActualWidth/ActualHeight 捕获，传递准确尺寸
-w = (int)Math.Round(this.ActualWidth * _dpiScaleX);
-h = (int)Math.Round(this.ActualHeight * _dpiScaleY);
-
 // 安全检查：确保不超出缓冲区
 int maxBytes = _writeableBitmap.BackBufferStride * _writeableBitmap.PixelHeight;
 if (pixelData.Length <= maxBytes) {
@@ -123,6 +129,39 @@ _wasShortcutPressed = isShortcutPressed;
 ### 问题 5: ClearType 文字彩色重影 ✅
 **方案**: 提高判定门槛 + 强制去色
 
+### 问题 6: DPI 与分辨率绑定导致坐标错误 ✅
+**原因**: 将分辨率倍数与 DPI 倍数相乘，导致 2K+100% 时倍率错误为 1.33
+
+**解决方案**: DPI 优先策略——设置了 DPI 后以 DPI 为绝对主导，忽略分辨率乘数；同时 UI 上当 DPI 非 Auto 时禁用分辨率下拉框
+
+### 问题 7: 锁定模式下锁定按钮不可点击 ✅
+**原因**: `WS_EX_TRANSPARENT` 穿透会让所有鼠标事件穿透窗口
+
+**解决方案**: 鼠标位置轮询 + 动态切换穿透属性
+```csharp
+// 50ms 轮询鼠标位置
+GetCursorPos(out POINT pt);
+// 判断鼠标是否在锁定按钮上
+bool isMouseOverButton = /* 坐标比较 */;
+if (isMouseOverButton) {
+    // 移除穿透，允许点击
+    SetWindowLong(handle, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+} else {
+    // 恢复穿透
+    SetWindowLong(handle, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+}
+```
+
+### 问题 8: 锁定按钮点击与拖动冲突 ✅
+**原因**: 需要同时支持点击（锁定/解锁）和拖动（移动窗口）
+
+**解决方案**: PreviewMouse 事件 + 拖动距离阈值判定
+```csharp
+// MouseDown 记录起始点并捕获鼠标
+// MouseMove 检测拖动距离，超过阈值则释放捕获并 DragMove()
+// MouseUp 如果未拖动则视为点击，触发 ToggleLockState()
+```
+
 ---
 
 ## 当前架构
@@ -134,6 +173,7 @@ _wasShortcutPressed = isShortcutPressed;
 │  │ 系统托盘 (NotifyIcon)                                       │ │
 │  │ - 双击：打开设置窗口                                        │ │
 │  │ - 右键菜单：开启/关闭、设置、退出                           │ │
+│  │ HandleMainWindowClosing() - 关闭行为分流                    │ │
 │  └────────────────────────────────────────────────────────────┘ │
 └──────────────────────────────────────────────────────────────────┘
                               │
@@ -144,25 +184,40 @@ _wasShortcutPressed = isShortcutPressed;
 │  ┌───────────────────────────┐  │   │  ┌───────────────────────────┐  │
 │  │ 设置面板                  │  │   │  │ Win32 API                 │  │
 │  │ - 快捷键选择 (修饰键+字母)│  │   │  │ - SetWindowDisplayAffinity│  │
-│  │ - 保存配置                │  │   │  │ - WS_EX_TRANSPARENT       │  │
+│  │ - DPI 缩放比例            │  │   │  │ - WS_EX_TRANSPARENT       │  │
+│  │ - 分辨率配置              │  │   │  │ - GetAsyncKeyState        │  │
+│  │ - 关闭行为                │  │   │  │ - GetCursorPos            │  │
+│  │ - 保存配置                │  │   │  │ - WndProc Hook            │  │
 │  │ - 开启/关闭遮罩           │  │   │  └───────────────────────────┘  │
-│  │ - 关闭时隐藏到托盘        │  │   │  ┌───────────────────────────┐  │
-│  └───────────────────────────┘  │   │  │ SettingsManager           │  │
-└─────────────────────────────────┘   │  │ - 读取自定义快捷键        │  │
-         ▲                            │  │ - 动态更新 UI 提示          │  │
+│  │ - DPI↔分辨率联动禁用      │  │   │  ┌───────────────────────────┐  │
+│  └───────────────────────────┘  │   │  │ 控制栏                    │  │
+└─────────────────────────────────┘   │  │ - DPI 缩放下拉框          │  │
+         ▲                            │  │ - 模式切换按钮            │  │
+         │                            │  │ - 关闭按钮                │  │
          │                            │  └───────────────────────────┘  │
-         │                            │  ┌───────────────────────────┐  │
-┌────────┴────────────────────────┐   │  │ DispatcherTimer (30FPS)   │  │
-│    SettingsManager              │   │  │ - 快捷键检测              │  │
-│  ┌───────────────────────────┐  │   │  │ - CaptureAndUpdateAsync   │  │
-│  │ config.json               │  │   │  └───────────────────────────┘  │
-│  │ - ModifierKey             │  │   └─────────────────────────────────┘
-│  │ - ActionKey               │   │              │
-│  │ - ShortcutName            │  │              ▼
-│  └───────────────────────────┘  │   ┌─────────────────────────────────┐
-│  Load() / Save()                │   │  颜色处理流水线                 │
-│                                 │   │  捕获 → 反转 → UpdateBitmap    │
-└─────────────────────────────────┘   └─────────────────────────────────┘
+┌────────┴────────────────────────┐   │  ┌───────────────────────────┐  │
+│    SettingsManager              │   │  │ LockButton (浮动)         │  │
+│  ┌───────────────────────────┐  │   │  │ - 点击：锁定/解锁         │  │
+│  │ config.json               │  │   │  │ - 拖动：移动窗口          │  │
+│  │ - ModifierKey / ActionKey │  │   │  │ - 图标：🔓/🔒             │  │
+│  │ - ShortcutName            │  │   │  └───────────────────────────┘  │
+│  │ - ResolutionMode          │  │   │  ┌───────────────────────────┐  │
+│  │ - DpiScaleMode            │  │   │  │ DispatcherTimer (30FPS)   │  │
+│  │ - CloseBehavior           │  │   │  │ - 快捷键检测 (边缘触发)   │  │
+│  └───────────────────────────┘  │   │  │ - CaptureAndUpdateAsync   │  │
+│  Load() / Save()                │   │  └───────────────────────────┘  │
+└─────────────────────────────────┘   │  ┌───────────────────────────┐  │
+                                      │  │ HitTestTimer (50ms)       │  │
+                                      │  │ - 锁定时鼠标位置轮询     │  │
+                                      │  │ - 动态穿透属性切换       │  │
+                                      │  └───────────────────────────┘  │
+                                      └─────────────────────────────────┘
+                                                    │
+                                                    ▼
+                                      ┌─────────────────────────────────┐
+                                      │  颜色处理流水线                 │
+                                      │  捕获 → 反转 → UpdateBitmap    │
+                                      └─────────────────────────────────┘
 ```
 
 ---
@@ -172,15 +227,17 @@ _wasShortcutPressed = isShortcutPressed;
 | 文件 | 行数 | 用途 |
 |------|------|------|
 | `ScreenInverter.csproj` | 19 | 项目配置（WPF + WindowsForms） |
-| `App.xaml(.cs)` | 78 | 应用入口 / 托盘管理 / 生命周期 |
-| `MainWindow.xaml(.cs)` | 71 | 设置面板（快捷键配置） |
-| `InverterOverlayWindow.xaml` | 190 | 反色窗口 UI 定义 |
-| `InverterOverlayWindow.xaml.cs` | 445 | 核心逻辑：捕获/反转/交互 |
-| `ScreenCapture.cs` | ~40 | GDI+ 屏幕捕获封装 |
-| `Inverter.cs` | ~150 | 颜色处理算法 |
-| `SettingsManager.cs` | 41 | 配置管理（JSON 序列化） |
-| `config.json` | 5 | 用户配置文件 |
-| `app.manifest` | ~30 | DPI 感知/兼容性配置 |
+| `app.manifest` | 18 | DPI 感知 / Windows 兼容性配置 |
+| `App.xaml` | 8 | WPF 应用定义（无 StartupUri） |
+| `App.xaml.cs` | 99 | 应用入口 / 托盘管理 / 生命周期 / 关闭行为分流 |
+| `MainWindow.xaml` | 95 | 设置面板 UI（快捷键/分辨率/DPI/关闭行为） |
+| `MainWindow.xaml.cs` | 159 | 设置面板逻辑 / DPI↔分辨率联动 |
+| `InverterOverlayWindow.xaml` | 332 | 反色窗口 UI（含控制栏/锁定按钮/ComboBox 模板） |
+| `InverterOverlayWindow.xaml.cs` | 590 | 核心逻辑：捕获/反转/交互/锁定按钮/HitTest |
+| `ScreenCapture.cs` | 45 | GDI+ 屏幕捕获封装 |
+| `Inverter.cs` | 164 | 颜色处理算法（三种模式 + LUT） |
+| `SettingsManager.cs` | 54 | 配置管理（JSON 序列化） |
+| `config.json` | 11 | 用户配置文件 |
 
 ---
 
@@ -189,13 +246,15 @@ _wasShortcutPressed = isShortcutPressed;
 ### 柔和反转查找表
 ```csharp
 // 输入 [0, 255] → 输出 [215, 25]
-output = 25 + (255 - input) * (215 - 25) / 255
+double normalized = i / 255.0;
+double inverted = 1.0 - normalized;
+byte val = (byte)(25 + (inverted * (215 - 25)));
 ```
 
 ### 智能文档判定
 | 条件 | 判定 | 处理 |
 |------|------|------|
-| `sat > 40 && luma > 140` | 图片/高亮 | 保留原色，压暗 10% |
+| `sat > 40 && luma > 140` | 图片/高亮 | 保留原色，压暗 10% (`*230>>8`) |
 | 其他 | 文字/背景 | 强制去色 + 柔和反转 |
 
 ### 快捷键检测（边缘触发）
@@ -208,16 +267,24 @@ if (isModPressed && isActionPressed && !_wasShortcutPressed) {
 }
 ```
 
+### DPI 坐标计算策略
+```
+Auto+Auto → WPF PointToScreen (最稳定)
+DPI 手动  → 以 DPI 值为绝对准则，忽略分辨率乘数
+仅分辨率  → 降级兼容，用分辨率做粗略倍率推算
+```
+
 ---
 
 ## 使用说明
 
 | 操作 | 默认值/说明 |
 |------|-------------|
-| 拖动窗口 | 点击内容区域拖动 |
+| 拖动窗口 | 点击内容区域拖动 / 拖动锁定按钮 |
 | 调整大小 | 拖动边缘或角落（8 方向） |
-| 切换模式 | 点击"模式"按钮 |
-| 锁定/解锁 | `Ctrl+L`（可自定义） |
+| 切换模式 | 点击控制栏"模式"按钮 |
+| 锁定/解锁 | `Ctrl+L`（可自定义）/ 点击🔓按钮 |
+| DPI 缩放 | 控制栏下拉框快捷切换 |
 | 打开设置 | 双击托盘图标 |
 | 完全退出 | 右键托盘 → 完全退出 |
 
@@ -243,6 +310,9 @@ if (isModPressed && isActionPressed && !_wasShortcutPressed) {
 | v1.1 | 2026-03-04 | 三种模式 / 柔和反转 / 智能文档优化 |
 | v1.2 | 2026-03-05 | 崩溃修复 / 漂移修复 / 边缘触发 |
 | v2.0 | 2026-03-05 | 系统托盘 / 自定义快捷键 / 配置持久化 |
+| v2.1 | 2026-03-06 | DPI 与分辨率解耦 / DPI 优先策略 / UI 联动禁用 |
+| v2.2 | 2026-03-06 | 关闭行为配置 / overlay 控制栏 DPI 下拉框 |
+| v3.0 | 2026-03-07 | 浮动锁定按钮 / HitTest 轮询 / 按钮拖动窗口 / WndProc Hook |
 
 ---
 
@@ -254,16 +324,17 @@ if (isModPressed && isActionPressed && !_wasShortcutPressed) {
 4. **性能优化**: 探索 Desktop Duplication API 替代 GDI+
 5. **S 曲线映射**: 进一步优化中间调过渡
 6. **自定义图标**: 为托盘图标添加专属 `.ico` 文件
+7. **DPI 自动检测优化**: 减少手动 DPI 选择的需求
 
 ---
 
 ## 当前状态
 
-- **构建状态**: ✅ 成功（0 错误，0 警告）
-- **配置文件**: ✅ 已生成 `config.json`
+- **构建状态**: ✅ 成功
+- **配置文件**: ✅ 已生成 `config.json`（含 9 个配置项）
 - **功能完整度**: ✅ 核心功能全部完成
 - **已知问题**: 无
 
 ---
 
-*报告生成时间：2026-03-05*
+*报告更新时间：2026-03-13*

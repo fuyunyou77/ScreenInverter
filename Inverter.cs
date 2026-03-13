@@ -9,156 +9,269 @@ namespace ScreenInverter;
 
 /// <summary>
 /// 屏幕颜色反转器 - 支持多种反转模式
+/// 方案 B+C：分块自适应 + 全强度反转
+/// - 分块判断区域亮度（暗区不动，亮区全力反转）
+/// - 块间双线性插值 + 双重平滑，消除块边界
+/// - 块内所有像素使用同一 blend → 单调映射 → 零锯齿
 /// </summary>
 public class Inverter
 {
-    // 预计算的亮度映射表 (256长度)
+    // 分块参数
+    private const int BlockSize = 24;         // 较大的块以减少边界数量
+    private const int BrightThreshold = 170;  // 块平均亮度 >= 此值 → 全力反转
+    private const int DarkThreshold = 90;     // 块平均亮度 <= 此值 → 不反转
+    private const int AdaptiveRange = BrightThreshold - DarkThreshold;
+
+    // 预计算的亮度映射表 — 全强度柔和反转 [0,255] → [215, 25]
     private static readonly byte[] _softInvertTable = new byte[256];
     private static bool _isTableInitialized = false;
 
-    /// <summary>
-    /// 初始化柔和反转的查找表 (LUT)
-    /// 目的：将线性反转 (255-x) 变成柔和的 S 型曲线，避免纯黑和纯白
-    /// </summary>
     private static void InitializeTable()
     {
         if (_isTableInitialized) return;
 
         for (int i = 0; i < 256; i++)
         {
-            // 柔和逻辑：
-            // 输入 255 (白背景) -> 输出 25 (深灰，不刺眼)
-            // 输入 0 (黑文字)   -> 输出 215 (灰白，对比度适中)
-            // 输入 128 (中灰)   -> 输出 120 (维持)
-
             double normalized = i / 255.0;
             double inverted = 1.0 - normalized;
-
-            byte val = (byte)(25 + (inverted * (215 - 25)));
-            _softInvertTable[i] = val;
+            _softInvertTable[i] = (byte)(25 + (inverted * (215 - 25)));
         }
         _isTableInitialized = true;
     }
 
     /// <summary>
-    /// 智能文档模式处理 (针对 ClearType 优化版)
-    /// - 白底黑字 -> 深灰底灰白字 (护眼)
-    /// - ClearType 边缘 -> 亮度反转，保留色相 (消除锯齿)
-    /// - 明亮彩色图片 -> 保留原色，略微压暗
+    /// 构建平滑的分块混合图
     /// </summary>
+    private static float[] BuildBlendMap(byte[] pixelData, int width, int height, out int blocksX, out int blocksY)
+    {
+        blocksX = (width + BlockSize - 1) / BlockSize;
+        blocksY = (height + BlockSize - 1) / BlockSize;
+        int totalBlocks = blocksY * blocksX;
+        var rawBlend = new float[totalBlocks];
+
+        // 1. 计算每块平均亮度 → blend
+        for (int by = 0; by < blocksY; by++)
+        {
+            for (int bx = 0; bx < blocksX; bx++)
+            {
+                int startX = bx * BlockSize;
+                int startY = by * BlockSize;
+                int endX = Math.Min(startX + BlockSize, width);
+                int endY = Math.Min(startY + BlockSize, height);
+
+                long lumaSum = 0;
+                int count = 0;
+
+                for (int y = startY; y < endY; y += 2)
+                {
+                    for (int x = startX; x < endX; x += 2)
+                    {
+                        int idx = (y * width + x) * 4;
+                        if (idx + 2 >= pixelData.Length) continue;
+                        lumaSum += (pixelData[idx + 2] * 77 + pixelData[idx + 1] * 150 + pixelData[idx] * 29) >> 8;
+                        count++;
+                    }
+                }
+
+                int avgLuma = count > 0 ? (int)(lumaSum / count) : 128;
+                float blend;
+                if (avgLuma >= BrightThreshold) blend = 1.0f;
+                else if (avgLuma <= DarkThreshold) blend = 0.0f;
+                else blend = (float)(avgLuma - DarkThreshold) / AdaptiveRange;
+
+                rawBlend[by * blocksX + bx] = blend;
+            }
+        }
+
+        // 2. 双重平滑（两次 3×3 均值模糊）
+        var temp = new float[totalBlocks];
+        Smooth3x3(rawBlend, temp, blocksX, blocksY);
+        Smooth3x3(temp, rawBlend, blocksX, blocksY);
+
+        return rawBlend;
+    }
+
+    private static void Smooth3x3(float[] src, float[] dst, int bx, int by)
+    {
+        for (int y = 0; y < by; y++)
+        {
+            for (int x = 0; x < bx; x++)
+            {
+                float sum = 0;
+                int n = 0;
+                for (int dy = -1; dy <= 1; dy++)
+                {
+                    for (int dx = -1; dx <= 1; dx++)
+                    {
+                        int ny = y + dy, nx = x + dx;
+                        if (ny >= 0 && ny < by && nx >= 0 && nx < bx)
+                        {
+                            sum += src[ny * bx + nx];
+                            n++;
+                        }
+                    }
+                }
+                dst[y * bx + x] = sum / n;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 双线性插值取像素的混合因子
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int GetPixelBlend(float[] blendMap, int blocksX, int blocksY, int px, int py)
+    {
+        float fbx = (px + 0.5f) / BlockSize - 0.5f;
+        float fby = (py + 0.5f) / BlockSize - 0.5f;
+
+        int bx0 = Math.Max(0, (int)fbx);
+        int by0 = Math.Max(0, (int)fby);
+        int bx1 = Math.Min(blocksX - 1, bx0 + 1);
+        int by1 = Math.Min(blocksY - 1, by0 + 1);
+
+        float fx = Math.Max(0, fbx - bx0);
+        float fy = Math.Max(0, fby - by0);
+
+        float top = blendMap[by0 * blocksX + bx0] * (1 - fx) + blendMap[by0 * blocksX + bx1] * fx;
+        float bot = blendMap[by1 * blocksX + bx0] * (1 - fx) + blendMap[by1 * blocksX + bx1] * fx;
+        float blend = top * (1 - fy) + bot * fy;
+
+        return (int)(blend * 255);
+    }
+
+    // ─────────── 三种反转模式 ───────────
+
     public static void ProcessSmartInvert(byte[] pixelData, int width, int height)
     {
         if (!_isTableInitialized) InitializeTable();
+        var blendMap = BuildBlendMap(pixelData, width, height, out int blocksX, out int blocksY);
 
-        // 并行处理，利用多核 CPU 加速
-        Parallel.For(0, pixelData.Length / 4, i =>
+        Parallel.For(0, height, y =>
         {
-            int idx = i * 4;
-            byte b = pixelData[idx];
-            byte g = pixelData[idx + 1];
-            byte r = pixelData[idx + 2];
-
-            // 1. 计算亮度 (Luma) 和 饱和度 (Saturation)
-            // 使用整数运算优化：L = 0.299R + 0.587G + 0.114B
-            int luma = (r * 77 + g * 150 + b * 29) >> 8;
-            byte max = r > g ? (r > b ? r : b) : (g > b ? g : b);
-            byte min = r < g ? (r < b ? r : b) : (g < b ? g : b);
-            int sat = max - min;
-
-            // 2. 严格的图片/高亮判定
-            // 提高判定门槛，防止 ClearType 边缘(通常 Luma<100, Sat>50) 被误判为图片
-            // 只有 "既很亮 又 很鲜艳" 的像素（如黄色高亮笔、浅色图表）才保留原色
-            bool isBrightImage = (sat > 40) && (luma > 140);
-
-            if (isBrightImage)
+            for (int x = 0; x < width; x++)
             {
-                // --- 图片/高亮模式 ---
-                // 保留原色，但稍微压暗一点以防刺眼 (原色 x 0.9)
-                pixelData[idx] = (byte)((b * 230) >> 8);
-                pixelData[idx + 1] = (byte)((g * 230) >> 8);
-                pixelData[idx + 2] = (byte)((r * 230) >> 8);
-            }
-            else
-            {
-                // --- 文本/背景/ClearType 模式 ---
-                // [核心修复] 强制去色 (Grayscale)
-                // 不要试图保留文字的色相 (b + diff)，那会放大 ClearType 的红/蓝噪点。
-                // 直接将 R/G/B 都设置为目标亮度。
-                // 效果：ClearType 的彩色边缘 -> 变为平滑的灰色边缘 -> 完美抗锯齿。
+                int idx = (y * width + x) * 4;
+                int blend = GetPixelBlend(blendMap, blocksX, blocksY, x, y);
+                if (blend == 0) continue;
 
-                byte targetLuma = _softInvertTable[luma];
+                byte b = pixelData[idx];
+                byte g = pixelData[idx + 1];
+                byte r = pixelData[idx + 2];
 
-                pixelData[idx] = targetLuma;
-                pixelData[idx + 1] = targetLuma;
-                pixelData[idx + 2] = targetLuma;
+                int luma = (r * 77 + g * 150 + b * 29) >> 8;
+                byte max = r > g ? (r > b ? r : b) : (g > b ? g : b);
+                byte min = r < g ? (r < b ? r : b) : (g < b ? g : b);
+                int sat = max - min;
+
+                byte outB, outG, outR;
+
+                if ((sat > 20) && (luma > 100))
+                {
+                    outB = (byte)((b * 140) >> 8);
+                    outG = (byte)((g * 140) >> 8);
+                    outR = (byte)((r * 140) >> 8);
+                }
+                else
+                {
+                    byte t = _softInvertTable[luma];
+                    outB = t; outG = t; outR = t;
+                }
+
+                if (blend < 255)
+                {
+                    int inv = 255 - blend;
+                    outB = (byte)((outB * blend + b * inv) >> 8);
+                    outG = (byte)((outG * blend + g * inv) >> 8);
+                    outR = (byte)((outR * blend + r * inv) >> 8);
+                }
+
+                pixelData[idx] = outB;
+                pixelData[idx + 1] = outG;
+                pixelData[idx + 2] = outR;
             }
         });
     }
 
-    /// <summary>
-    /// 强力全反模式 (柔和版)
-    /// 使用查找表实现柔和反色，避免纯黑纯白
-    /// </summary>
     public static void InvertColors(byte[] pixelData, int width, int height)
     {
         if (!_isTableInitialized) InitializeTable();
+        var blendMap = BuildBlendMap(pixelData, width, height, out int blocksX, out int blocksY);
 
-        Parallel.For(0, pixelData.Length / 4, i =>
+        Parallel.For(0, height, y =>
         {
-            int idx = i * 4;
-            pixelData[idx] = _softInvertTable[pixelData[idx]];     // B
-            pixelData[idx + 1] = _softInvertTable[pixelData[idx + 1]]; // G
-            pixelData[idx + 2] = _softInvertTable[pixelData[idx + 2]]; // R
+            for (int x = 0; x < width; x++)
+            {
+                int idx = (y * width + x) * 4;
+                int blend = GetPixelBlend(blendMap, blocksX, blocksY, x, y);
+                if (blend == 0) continue;
+
+                byte b = pixelData[idx];
+                byte g = pixelData[idx + 1];
+                byte r = pixelData[idx + 2];
+
+                byte outB = _softInvertTable[b];
+                byte outG = _softInvertTable[g];
+                byte outR = _softInvertTable[r];
+
+                if (blend < 255)
+                {
+                    int inv = 255 - blend;
+                    outB = (byte)((outB * blend + b * inv) >> 8);
+                    outG = (byte)((outG * blend + g * inv) >> 8);
+                    outR = (byte)((outR * blend + r * inv) >> 8);
+                }
+
+                pixelData[idx] = outB;
+                pixelData[idx + 1] = outG;
+                pixelData[idx + 2] = outR;
+            }
         });
     }
 
-    /// <summary>
-    /// 仅反转亮度 (柔和版，保留颜色)
-    /// 使用查找表实现柔和亮度反转
-    /// </summary>
     public static void InvertLightnessOnly(byte[] pixelData, int width, int height)
     {
         if (!_isTableInitialized) InitializeTable();
+        var blendMap = BuildBlendMap(pixelData, width, height, out int blocksX, out int blocksY);
 
-        Parallel.For(0, pixelData.Length / 4, i =>
+        Parallel.For(0, height, y =>
         {
-            int idx = i * 4;
-            byte b = pixelData[idx];
-            byte g = pixelData[idx + 1];
-            byte r = pixelData[idx + 2];
+            for (int x = 0; x < width; x++)
+            {
+                int idx = (y * width + x) * 4;
+                int blend = GetPixelBlend(blendMap, blocksX, blocksY, x, y);
+                if (blend == 0) continue;
 
-            // 计算亮度 (Rec.601)
-            int luma = (r * 77 + g * 150 + b * 29) >> 8;
+                byte b = pixelData[idx];
+                byte g = pixelData[idx + 1];
+                byte r = pixelData[idx + 2];
 
-            // 使用柔和反转查找表
-            byte targetLuma = _softInvertTable[luma];
+                int luma = (r * 77 + g * 150 + b * 29) >> 8;
+                byte targetLuma = _softInvertTable[luma];
 
-            // 应用亮度差值，保留色相
-            int diff = targetLuma - luma;
-            int nb = b + diff;
-            int ng = g + diff;
-            int nr = r + diff;
+                int diff = targetLuma - luma;
+                byte outB = (byte)Math.Clamp(b + diff, 0, 255);
+                byte outG = (byte)Math.Clamp(g + diff, 0, 255);
+                byte outR = (byte)Math.Clamp(r + diff, 0, 255);
 
-            // Clamp 防溢出
-            pixelData[idx] = (byte)(nb < 0 ? 0 : (nb > 255 ? 255 : nb));
-            pixelData[idx + 1] = (byte)(ng < 0 ? 0 : (ng > 255 ? 255 : ng));
-            pixelData[idx + 2] = (byte)(nr < 0 ? 0 : (nr > 255 ? 255 : nr));
+                if (blend < 255)
+                {
+                    int inv = 255 - blend;
+                    outB = (byte)((outB * blend + b * inv) >> 8);
+                    outG = (byte)((outG * blend + g * inv) >> 8);
+                    outR = (byte)((outR * blend + r * inv) >> 8);
+                }
+
+                pixelData[idx] = outB;
+                pixelData[idx + 1] = outG;
+                pixelData[idx + 2] = outR;
+            }
         });
     }
 
-    /// <summary>
-    /// 创建 WPF BitmapSource 从 byte 数组
-    /// </summary>
     public static BitmapSource CreateBitmapSource(byte[] pixelData, int width, int height)
     {
-        return BitmapSource.Create(
-            width,
-            height,
-            96,
-            96,
-            PixelFormats.Bgra32,
-            null,
-            pixelData,
-            width * 4);
+        return BitmapSource.Create(width, height, 96, 96,
+            PixelFormats.Bgra32, null, pixelData, width * 4);
     }
 }

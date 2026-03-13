@@ -32,6 +32,21 @@ public partial class InverterOverlayWindow : Window
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out POINT lpPoint);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    private const int WM_NCHITTEST = 0x0084;
+    private const int HTTRANSPARENT = -1;
+    private const int HTCLIENT = 1;
+
     private readonly ScreenCapture _screenCapture;
     private WriteableBitmap? _writeableBitmap;
     private bool _isResizing;
@@ -102,6 +117,11 @@ public partial class InverterOverlayWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         var helper = new WindowInteropHelper(this);
+        
+        // Hook WndProc for precise hit testing
+        HwndSource source = HwndSource.FromHwnd(helper.Handle);
+        source?.AddHook(WndProc);
+        
         try
         {
             SetWindowDisplayAffinity(helper.Handle, WDA_EXCLUDEFROMCAPTURE);
@@ -110,6 +130,62 @@ public partial class InverterOverlayWindow : Window
         {
             System.Diagnostics.Debug.WriteLine($"Failed to set display affinity: {ex.Message}");
         }
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        return IntPtr.Zero;
+    }
+
+    private DispatcherTimer? _hitTestTimer;
+
+    private void StartHitTestTimer()
+    {
+        if (_hitTestTimer == null)
+        {
+            _hitTestTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
+            _hitTestTimer.Tick += (s, e) =>
+            {
+                if (!_isLocked) return;
+
+                // 获取鼠标全局坐标
+                GetCursorPos(out POINT pt);
+                Point screenPoint = new Point(pt.X, pt.Y);
+
+                // 获取按钮在屏幕上的边界
+                Point buttonTopLeft = LockButton.PointToScreen(new Point(0, 0));
+                Point buttonBottomRight = LockButton.PointToScreen(new Point(LockButton.ActualWidth, LockButton.ActualHeight));
+
+                bool isMouseOverButton = screenPoint.X >= buttonTopLeft.X && screenPoint.X <= buttonBottomRight.X &&
+                                         screenPoint.Y >= buttonTopLeft.Y && screenPoint.Y <= buttonBottomRight.Y;
+
+                var helper = new WindowInteropHelper(this);
+                int exStyle = GetWindowLong(helper.Handle, GWL_EXSTYLE);
+
+                if (isMouseOverButton)
+                {
+                    // 鼠标在按钮上，移除穿透属性，允许点击
+                    if ((exStyle & WS_EX_TRANSPARENT) != 0)
+                    {
+                        SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
+                    }
+                }
+                else
+                {
+                    // 鼠标不在按钮上，恢复穿透属性
+                    if ((exStyle & WS_EX_TRANSPARENT) == 0)
+                    {
+                        SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
+                    }
+                }
+            };
+        }
+        _hitTestTimer.Start();
+    }
+
+    private void StopHitTestTimer()
+    {
+        _hitTestTimer?.Stop();
     }
 
     private async void TimerTick(object? sender, EventArgs e)
@@ -143,6 +219,7 @@ public partial class InverterOverlayWindow : Window
 
         if (_isLocked)
         {
+            // 锁定初期，先将窗口设为穿透
             SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle | WS_EX_TRANSPARENT);
 
             MainBorder.BorderThickness = new Thickness(0);
@@ -152,12 +229,17 @@ public partial class InverterOverlayWindow : Window
             StatusText.Text = $"已锁定。按 {SettingsManager.Current.ShortcutName} 解锁";
             
             LockIcon.Text = "🔒";
-            LockButton.ToolTip = "点击解锁";
+            LockButton.ToolTip = "点击解锁\n拖动可移动此按钮和窗口";
 
             Task.Delay(3000).ContinueWith(_ => Dispatcher.Invoke(() => StatusText.Visibility = Visibility.Collapsed));
+            
+            // 开启鼠标位置轮询
+            StartHitTestTimer();
         }
         else
         {
+            // 解锁时，停止轮询并确保移除穿透属性
+            StopHitTestTimer();
             SetWindowLong(helper.Handle, GWL_EXSTYLE, exStyle & ~WS_EX_TRANSPARENT);
 
             MainBorder.BorderThickness = new Thickness(2);
@@ -173,6 +255,50 @@ public partial class InverterOverlayWindow : Window
     private void LockButton_Click(object sender, RoutedEventArgs e)
     {
         ToggleLockState();
+        e.Handled = true; // 防止事件冒泡干扰
+    }
+
+    private Point _startDragPoint;
+    private bool _isDraggingButton;
+
+    private void LockButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Left)
+        {
+            _startDragPoint = e.GetPosition(this);
+            _isDraggingButton = true;
+            LockButton.CaptureMouse();
+        }
+    }
+
+    private void LockButton_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_isDraggingButton && e.LeftButton == MouseButtonState.Pressed)
+        {
+            Point currentPoint = e.GetPosition(this);
+            if (Math.Abs(currentPoint.X - _startDragPoint.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                Math.Abs(currentPoint.Y - _startDragPoint.Y) > SystemParameters.MinimumVerticalDragDistance)
+            {
+                // 如果确认为拖动，则释放鼠标捕获并启动窗口拖动
+                _isDraggingButton = false;
+                LockButton.ReleaseMouseCapture();
+                this.DragMove();
+            }
+        }
+    }
+
+    private void LockButton_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (_isDraggingButton)
+        {
+            // 如果鼠标抬起时还在处于“准备拖动但没真正拖动”的状态，那说明这是一次纯点击
+            _isDraggingButton = false;
+            LockButton.ReleaseMouseCapture();
+            
+            // 触发解锁/锁定逻辑
+            ToggleLockState();
+            e.Handled = true;
+        }
     }
 
     private void ResizeThumbsVisibility(Visibility v)

@@ -7,5 +7,5 @@
   "CustomResH": 1080,
   "DpiScaleMode": "Auto",
   "CustomDpiScale": 75,
-  "CloseBehavior": "MinimizeToTray"
+  "CloseBehavior": "Exit"
 }
