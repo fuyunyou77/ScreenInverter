@@ -50,7 +50,7 @@ public partial class InverterOverlayWindow : Window
     private readonly ScreenCapture _screenCapture;
     private WriteableBitmap? _writeableBitmap;
     private bool _isResizing;
-    private int _inversionMode = 0; // 默认智能模式
+    private int _inversionMode = 1; // 默认柔和全反
     private readonly DispatcherTimer _captureTimer;
     private bool _isCapturing;
     private bool _isLocked = false;
@@ -74,8 +74,8 @@ public partial class InverterOverlayWindow : Window
 
         this.MouseLeftButtonDown += OnMouseLeftButtonDown;
 
-        // 初始化模式按钮文本为默认值（强力全反）
-        ModeButton.Content = "模式：强力全反";
+        // 初始化模式按钮文本为默认值
+        ModeButton.Content = "模式：柔和全反";
 
         // 初始化 DPI 缩放下拉框
         InitDpiScaleComboBox();
@@ -417,10 +417,6 @@ public partial class InverterOverlayWindow : Window
                     var pixelData = new byte[byteCount];
                     Marshal.Copy(data.Scan0, pixelData, 0, byteCount);
 
-                    // --- CPU 侧不再进行像素反色计算！全权交由 WPF ShaderEffect (GPU) 处理 ---
-                    // 这里原本有 Inverter.ProcessSmartInvert 等耗时操作
-                    // 现在仅作纯粹的内存拷贝
-                    
                     Dispatcher.Invoke(() => UpdateBitmap(pixelData, physicalW, physicalH));
                 }
                 finally
@@ -493,23 +489,27 @@ public partial class InverterOverlayWindow : Window
 
     private void ModeButton_Click(object sender, RoutedEventArgs e)
     {
-        _inversionMode = (_inversionMode + 1) % 2; // 只保留两种 GPU 模式
+        _inversionMode = (_inversionMode + 1) % 3;
         var effect = CapturedImage.Effect as InvertEffect;
         if (effect == null) return;
         
         switch (_inversionMode)
         {
             case 0: 
-                ModeButton.Content = "模式：智能文档"; 
-                // 柔和反转预设: Floor=25(0.098), Range=105(0.41)
-                effect.OutputFloor = 25.0 / 255.0;
-                effect.OutputRange = 105.0 / 255.0;
+                ModeButton.Content = "模式：智能暗色"; 
+                // 逐像素亮度阈值反转
+                effect.Mode = 0.0;
+                effect.DarkThreshold = 0.35;
+                effect.BrightThreshold = 0.70;
+                effect.TargetDarkLevel = 0.12;
                 break;
             case 1: 
+                ModeButton.Content = "模式：柔和全反"; 
+                effect.Mode = 1.0;
+                break;
+            case 2: 
                 ModeButton.Content = "模式：强力全反"; 
-                // 绝对黑白反转: Floor=0, Range=255(1.0)
-                effect.OutputFloor = 0.0;
-                effect.OutputRange = 1.0;
+                effect.Mode = 2.0;
                 break;
         }
     }

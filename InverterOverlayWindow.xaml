@@ -190,7 +190,7 @@
 
                     <Button Grid.Column="2"
                             x:Name="ModeButton"
-                            Content="模式：智能文档"
+                            Content="模式：柔和全反"
                             Click="ModeButton_Click"
                             Foreground="#FFFFFF"
                             Background="#CC333333"
