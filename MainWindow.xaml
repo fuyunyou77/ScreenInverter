@@ -225,7 +225,7 @@
                     Foreground="White"
                     BorderBrush="#2080D0"/>
 
-            <TextBlock Text="提示：在强烈的黑白交界处会出现白色光晕并非bug"
+            <TextBlock Text=""
                        HorizontalAlignment="Center"
                        Margin="0,15,0,0"
                        Foreground="#777777"

@@ -5,7 +5,7 @@
   "ResolutionMode": "Auto",
   "CustomResW": 1920,
   "CustomResH": 1080,
-  "DpiScaleMode": "Auto",
+  "DpiScaleMode": "150",
   "CustomDpiScale": 75,
   "CloseBehavior": "Exit"
 }
