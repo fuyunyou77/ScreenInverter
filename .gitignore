@@ -1,7 +1,7 @@
 bin/
 obj/
 .claude/
-.ocm/
+.omc/
 *.png
 *.json
 *.ps1
