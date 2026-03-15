@@ -65,3 +65,6 @@ dotnet publish -c Release -r win-x64 ^
 - 单文件发布（PublishSingleFile）
 - 启用压缩（EnableCompressionInSingleFile）
 - 不裁剪代码（PublishTrimmed=false）- WPF 依赖反射，裁剪有风险
+
+## 开源说明
+本项目采用 GPL 协议开源。个人学习、研究可自由使用。若涉及商业用途（如集成进闭源产品、用于公司盈利项目等），请联系作者购买商业授权。
