@@ -2,3 +2,13 @@ bin/
 obj/
 
 .ocm/
+
+# Publish output
+publish/
+installer-output/
+
+# Inno Setup temporary files
+*.tmp
+*.iss
+*.png
+*.json

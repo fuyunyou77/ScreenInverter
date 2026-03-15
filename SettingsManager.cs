@@ -25,16 +25,16 @@ public class AppSettings
 
 public static class SettingsManager
 {
-    private static readonly string Path = "config.json";
+    private static readonly string ConfigPath = Path.Combine(AppContext.BaseDirectory, "config.json");
     public static AppSettings Current { get; private set; } = new AppSettings();
 
     public static void Load()
     {
-        if (File.Exists(Path))
+        if (File.Exists(ConfigPath))
         {
             try
             {
-                string json = File.ReadAllText(Path);
+                string json = File.ReadAllText(ConfigPath);
                 Current = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             }
             catch { Current = new AppSettings(); }
@@ -46,7 +46,7 @@ public static class SettingsManager
         try
         {
             string json = JsonSerializer.Serialize(Current, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(Path, json);
+            File.WriteAllText(ConfigPath, json);
         }
         catch { }
     }

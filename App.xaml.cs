@@ -71,9 +71,14 @@ public partial class App : System.Windows.Application
 
     private void InitializeTrayIcon()
     {
+        // 从 exe 自身提取图标（避免依赖外部文件）
+        using var process = System.Diagnostics.Process.GetCurrentProcess();
+        var exePath = process.MainModule?.FileName ?? "";
+        var exeIcon = string.IsNullOrEmpty(exePath) ? null : Drawing.Icon.ExtractAssociatedIcon(exePath);
+
         _notifyIcon = new Forms.NotifyIcon
         {
-            Icon = Drawing.SystemIcons.Application,
+            Icon = exeIcon ?? Drawing.SystemIcons.WinLogo,
             Visible = true,
             Text = "Screen Inverter (双击打开设置)"
         };

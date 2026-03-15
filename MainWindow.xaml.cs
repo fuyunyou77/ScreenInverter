@@ -3,6 +3,7 @@ using System.Windows;
 using System.Windows.Controls;
 using WpfMessageBox = System.Windows.MessageBox;
 using WpfApplication = System.Windows.Application;
+using Drawing = System.Drawing;
 
 namespace ScreenInverter;
 
@@ -12,6 +13,27 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         LoadSettingsToUI();
+        SetWindowIcon();
+    }
+
+    private void SetWindowIcon()
+    {
+        try
+        {
+            // 从 exe 自身提取图标（避免依赖外部文件）
+            using var process = System.Diagnostics.Process.GetCurrentProcess();
+            var exePath = process.MainModule?.FileName ?? "";
+            var exeIcon = !string.IsNullOrEmpty(exePath) ? Drawing.Icon.ExtractAssociatedIcon(exePath) : null;
+            if (exeIcon != null)
+            {
+                Icon = System.Windows.Interop.Imaging.CreateBitmapSourceFromHIcon(
+                    exeIcon.Handle,
+                    new System.Windows.Int32Rect(0, 0, exeIcon.Width, exeIcon.Height),
+                    System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                exeIcon.Dispose();
+            }
+        }
+        catch { }
     }
 
     private void LoadSettingsToUI()

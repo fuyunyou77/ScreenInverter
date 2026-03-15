@@ -9,6 +9,18 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <PerMonitorV2Awareness>true</PerMonitorV2Awareness>
+    <ApplicationIcon>icon\dark_256.ico</ApplicationIcon>
+
+    <!-- Single-file publishing configuration for standalone distribution -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)'=='Release'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
   </PropertyGroup>
 
   <ItemGroup>
