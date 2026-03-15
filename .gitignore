@@ -1,7 +1,10 @@
 bin/
 obj/
-
+.claude/
 .ocm/
+*.png
+*.json
+*.ps1
 
 # Publish output
 publish/
@@ -10,5 +13,4 @@ installer-output/
 # Inno Setup temporary files
 *.tmp
 *.iss
-*.png
-*.json
+
