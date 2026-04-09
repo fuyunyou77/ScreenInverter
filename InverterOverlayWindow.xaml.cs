@@ -67,10 +67,11 @@ public partial class InverterOverlayWindow : Window
 
         this.SourceInitialized += OnSourceInitialized;
 
-        this.Left = 100;
-        this.Top = 100;
-        this.Width = 500;
-        this.Height = 400;
+        // 从设置读取上次保存的窗口位置和大小，如果没有保存则使用默认值
+        this.Left = SettingsManager.Current.OverlayWindowX;
+        this.Top = SettingsManager.Current.OverlayWindowY;
+        this.Width = SettingsManager.Current.OverlayWindowWidth;
+        this.Height = SettingsManager.Current.OverlayWindowHeight;
 
         this.MouseLeftButtonDown += OnMouseLeftButtonDown;
 
@@ -117,11 +118,11 @@ public partial class InverterOverlayWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         var helper = new WindowInteropHelper(this);
-        
+
         // Hook WndProc for precise hit testing
         HwndSource source = HwndSource.FromHwnd(helper.Handle);
         source?.AddHook(WndProc);
-        
+
         try
         {
             SetWindowDisplayAffinity(helper.Handle, WDA_EXCLUDEFROMCAPTURE);
@@ -227,12 +228,12 @@ public partial class InverterOverlayWindow : Window
             ResizeThumbsVisibility(Visibility.Collapsed);
             StatusText.Visibility = Visibility.Visible;
             StatusText.Text = $"已锁定。按 {SettingsManager.Current.ShortcutName} 解锁";
-            
+
             LockIcon.Text = "🔒";
             LockButton.ToolTip = "点击解锁\n拖动可移动此按钮和窗口";
 
             Task.Delay(3000).ContinueWith(_ => Dispatcher.Invoke(() => StatusText.Visibility = Visibility.Collapsed));
-            
+
             // 开启鼠标位置轮询
             StartHitTestTimer();
         }
@@ -246,7 +247,7 @@ public partial class InverterOverlayWindow : Window
             ControlBar.Visibility = Visibility.Visible;
             ResizeThumbsVisibility(Visibility.Visible);
             StatusText.Visibility = Visibility.Collapsed;
-            
+
             LockIcon.Text = "🔓";
             LockButton.ToolTip = "点击锁定";
         }
@@ -294,7 +295,7 @@ public partial class InverterOverlayWindow : Window
             // 如果鼠标抬起时还在处于“准备拖动但没真正拖动”的状态，那说明这是一次纯点击
             _isDraggingButton = false;
             LockButton.ReleaseMouseCapture();
-            
+
             // 触发解锁/锁定逻辑
             ToggleLockState();
             e.Handled = true;
@@ -492,23 +493,23 @@ public partial class InverterOverlayWindow : Window
         _inversionMode = (_inversionMode + 1) % 3;
         var effect = CapturedImage.Effect as InvertEffect;
         if (effect == null) return;
-        
+
         switch (_inversionMode)
         {
-            case 0: 
-                ModeButton.Content = "模式：智能暗色"; 
+            case 0:
+                ModeButton.Content = "模式：智能暗色";
                 // 逐像素亮度阈值反转
                 effect.Mode = 0.0;
                 effect.DarkThreshold = 0.35;
                 effect.BrightThreshold = 0.70;
                 effect.TargetDarkLevel = 0.12;
                 break;
-            case 1: 
-                ModeButton.Content = "模式：柔和全反"; 
+            case 1:
+                ModeButton.Content = "模式：柔和全反";
                 effect.Mode = 1.0;
                 break;
-            case 2: 
-                ModeButton.Content = "模式：强力全反"; 
+            case 2:
+                ModeButton.Content = "模式：强力全反";
                 effect.Mode = 2.0;
                 break;
         }
@@ -589,6 +590,13 @@ public partial class InverterOverlayWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        // 在关闭时保存窗口的位置和大小
+        SettingsManager.Current.OverlayWindowX = this.Left;
+        SettingsManager.Current.OverlayWindowY = this.Top;
+        SettingsManager.Current.OverlayWindowWidth = this.Width;
+        SettingsManager.Current.OverlayWindowHeight = this.Height;
+        SettingsManager.Save();
+
         _captureTimer.Stop();
         _screenCapture.Dispose();
         base.OnClosed(e);

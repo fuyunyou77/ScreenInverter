@@ -21,6 +21,12 @@ public class AppSettings
 
     // 关闭行为设置 (MinimizeToTray 或 Exit)
     public string CloseBehavior { get; set; } = "MinimizeToTray";
+
+    // 遮罩窗口位置和大小记忆
+    public double OverlayWindowX { get; set; } = 100;
+    public double OverlayWindowY { get; set; } = 100;
+    public double OverlayWindowWidth { get; set; } = 500;
+    public double OverlayWindowHeight { get; set; } = 400;
 }
 
 public static class SettingsManager
